@@ -1,0 +1,287 @@
+// Window, input, menu bar item, command-line test hooks.
+import AppKit
+import MetalKit
+import ServiceManagement
+
+final class Globals { var gfx: Gfx?; var LW: Float = 1280; var LH: Float = 800; var view: MatrixView?; var window: NSWindow?; var testSocket = "" }
+let G = Globals()
+let args = CommandLine.arguments
+func argValue(_ name: String) -> String? { if let i = args.firstIndex(of: name), i + 1 < args.count { return args[i + 1] }; return nil }
+
+final class MatrixView: MTKView, MTKViewDelegate {
+    var lDown = false, rDown = false, downX: CGFloat = 0, downY: CGFloat = 0, lastT = nowSec(), uiCapture = false
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    func setup() {
+        delegate = self; preferredFramesPerSecond = 60; enableSetNeedsDisplay = false; isPaused = false
+        let ta = NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect], owner: self, userInfo: nil); addTrackingArea(ta)
+        // the display link stops while the window is occluded or the display sleeps; keep the model and screenshots going at 4 fps
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self = self, !self.isPaused, nowSec() - self.lastT > 0.4 else { return }
+            self.draw()
+        }
+    }
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    func draw(in view: MTKView) {
+        guard let gfx = G.gfx else { return }
+        let s = Float(window?.backingScaleFactor ?? 2); gfx.rebuildAtlas(scale: s)
+        G.LW = Float(bounds.width); G.LH = Float(bounds.height); gfx.LW = G.LW; gfx.LH = G.LH
+        let t = nowSec(); let dt = Float(min(0.1, t - lastT)); lastT = t
+        frameScene(dt)
+        drawUi()
+        if UIS.clickNow && !UIS.mouseOverUi && !cf.open { UIS.panelScroll = 0; selectKey(hov) }
+        UIS.clickNow = false; UIS.wheelUi = 0; navKey = 0
+        gfx.draw(view: self, vp: VP, fog: 0.0019)
+    }
+    // ---- mouse
+    func pt(_ e: NSEvent) -> (Float, Float) { let p = convert(e.locationInWindow, from: nil); return (Float(p.x), Float(bounds.height - p.y)) }
+    override func mouseMoved(with e: NSEvent) { (UIS.mouseX, UIS.mouseY) = pt(e) }
+    override func mouseDown(with e: NSEvent) {
+        window?.makeFirstResponder(self)
+        (UIS.mouseX, UIS.mouseY) = pt(e); downX = e.locationInWindow.x; downY = e.locationInWindow.y
+        uiCapture = UIS.mouseY < 50 || UIS.overUi(UIS.mouseX, UIS.mouseY) || cf.open
+        lDown = !uiCapture
+    }
+    override func mouseDragged(with e: NSEvent) {
+        (UIS.mouseX, UIS.mouseY) = pt(e)
+        guard lDown else { return }
+        if e.modifierFlags.contains(.shift) { panBy(Float(e.deltaX), Float(e.deltaY)) }
+        else if abs(e.locationInWindow.x - downX) > 4 || abs(e.locationInWindow.y - downY) > 4 {
+            camYaw -= Float(e.deltaX) * 0.006; camPitch = max(-1.45, min(1.5, camPitch + Float(e.deltaY) * 0.006)); flying = false
+        }
+    }
+    override func mouseUp(with e: NSEvent) {
+        (UIS.mouseX, UIS.mouseY) = pt(e)
+        if abs(e.locationInWindow.x - downX) < 5 && abs(e.locationInWindow.y - downY) < 5 { UIS.clickNow = true }
+        lDown = false
+    }
+    override func rightMouseDown(with e: NSEvent) { (UIS.mouseX, UIS.mouseY) = pt(e); rDown = !(UIS.mouseY < 50 || UIS.overUi(UIS.mouseX, UIS.mouseY)) }
+    override func rightMouseDragged(with e: NSEvent) { (UIS.mouseX, UIS.mouseY) = pt(e); if rDown { panBy(Float(e.deltaX), Float(e.deltaY)) } }
+    override func rightMouseUp(with e: NSEvent) { rDown = false }
+    override func otherMouseDown(with e: NSEvent) { rightMouseDown(with: e) }
+    override func otherMouseDragged(with e: NSEvent) { rightMouseDragged(with: e) }
+    override func otherMouseUp(with e: NSEvent) { rDown = false }
+    /// Mouse wheel and two-finger scroll zoom; with ⌥ (or a horizontal trackpad swipe) they pan.
+    override func scrollWheel(with e: NSEvent) {
+        (UIS.mouseX, UIS.mouseY) = pt(e)
+        let precise = e.hasPreciseScrollingDeltas
+        let dy = Float(e.scrollingDeltaY) / (precise ? 12 : 1), dx = Float(e.scrollingDeltaX) / (precise ? 12 : 1)
+        if UIS.mouseY < 50 || UIS.overUi(UIS.mouseX, UIS.mouseY) { UIS.wheelUi += dy; return }
+        if e.modifierFlags.contains(.option) || (precise && abs(dx) > abs(dy) * 1.5) { panBy(Float(e.scrollingDeltaX) * (precise ? 1 : 8), Float(e.scrollingDeltaY) * (precise ? 1 : 8)); return }
+        camDist = max(6, min(1500, camDist * pow(0.88, dy))); flyDist = camDist; flying = false
+    }
+    override func magnify(with e: NSEvent) {
+        (UIS.mouseX, UIS.mouseY) = pt(e)
+        if UIS.overUi(UIS.mouseX, UIS.mouseY) { return }
+        camDist = max(6, min(1500, camDist / Float(1 + e.magnification))); flyDist = camDist; flying = false
+    }
+    // ---- keyboard
+    override func keyDown(with e: NSEvent) { handleKey(code: e.keyCode, chars: e.characters ?? "", mods: e.modifierFlags) }
+    func handleKey(code: UInt16, chars: String, mods: NSEvent.ModifierFlags) {
+        if mods.contains(.command) { return }
+        let navMap: [UInt16: Int] = [126: NK.up, 125: NK.down, 123: NK.left, 124: NK.right, 116: NK.pgUp, 121: NK.pgDn, 115: NK.home, 119: NK.end, 36: NK.enter, 76: NK.enter]
+        if code == 53 { // Esc: confirmation, then list window, then search text and selection
+            if cf.open { cf.open = false } else if hexMode != 0 { hexClose() } else { query = ""; UIS.panelScroll = 0; selectKey("", fly: false) }
+            return
+        }
+        // while a list window is open, typing and the navigation keys belong to it, not to the filter or the 3D view
+        if hexMode != 0 && !cf.open { if let k = navMap[code] { navKey = k }; if chars == "[" || chars == "]" { stepWindow(chars == "]") }; return }
+        if cf.open { if code == 36 || code == 76 { } ; return }
+        let s: Float = 28
+        switch code {
+        case 123: panBy(s, 0)
+        case 124: panBy(-s, 0)
+        case 126, 125: var f = camT - eyePos(); f.y = 0; f = norm(f); camT += f * ((code == 126 ? 1 : -1) * camDist * 0.045); flying = false
+        case 116: panBy(0, s)
+        case 121: panBy(0, -s)
+        case 115: LY[view].framed = false; camYaw = 0; camPitch = 0.55; sel = ""; rebuild()
+        case 51:   // Backspace: the filter first, then (Disks) one folder up
+            if !query.isEmpty { query.removeLast(); computeFocus() }
+            else if view == 4 && !diskRoot.isEmpty { selectKey("dkroot:" + diskParent(diskRoot)) }
+        default:
+            if chars == "[" || chars == "]" { stepWindow(chars == "]"); return }
+            for u in chars.unicodeScalars where u.value >= 32 && u.value < 127 && query.count < 24 { query.append(Character(u).lowercased()); computeFocus() }
+        }
+    }
+    func stepWindow(_ up: Bool) { let ws = [1, 5, 10, 30, 60]; let i = ws.firstIndex(of: winSec) ?? 0; winSec = ws[max(0, min(4, i + (up ? 1 : -1)))] }
+}
+func panBy(_ dx: Float, _ dy: Float) {
+    let f = norm(camT - eyePos()), r = norm(simd_cross(f, V3(0, 1, 0))), u = simd_cross(r, f); let s = camDist * 0.0016
+    camT = camT + r * (-dx * s) + u * (dy * s); flying = false
+}
+
+// ================================================================ app delegate, menu bar
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
+    var window: NSWindow!; var status: NSStatusItem!; let menu = NSMenu()
+    var keepInMenuBar: Bool { get { UserDefaults.standard.bool(forKey: "keepInMenuBar") } set { UserDefaults.standard.set(newValue, forKey: "keepInMenuBar") } }
+    func applicationDidFinishLaunching(_ n: Notification) {
+        buildGeo()
+        if let s = argValue("--helper-socket") { HELPER_SOCKET = s }
+        buildMainMenu()
+        let startHidden = args.contains("--menubar")
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1500, height: 950), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.title = "MatrixSys — system visualizer"; window.minSize = NSSize(width: 900, height: 600); window.center(); window.delegate = self
+        window.backgroundColor = NSColor(red: 1 / 255, green: 6 / 255, blue: 15 / 255, alpha: 1)
+        window.setFrameAutosaveName("MatrixSysMain")
+        let v = MatrixView(frame: window.contentView!.bounds); v.autoresizingMask = [.width, .height]
+        guard let gfx = Gfx(view: v) else { let a = NSAlert(); a.messageText = "Metal is not available on this Mac."; a.runModal(); NSApp.terminate(nil); return }
+        G.gfx = gfx; G.view = v; G.window = window
+        v.setup(); window.contentView = v; window.makeFirstResponder(v)
+        gfx.shotDone = { p, ok in TestHooks.shotFinished(p, ok) }
+        if !startHidden { window.makeKeyAndOrderFront(nil); if !args.contains("--background") { NSApp.activate(ignoringOtherApps: true) } } else { v.isPaused = true }
+        setupStatusItem()
+        Model.shared.start()
+        if let s = argValue("--select"), let pid = Int32(s) { pendingSel = pid }
+        if let s = argValue("--memory"), let pid = Int32(s) { DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { hexOpenMem(pid) } }
+        if let s = argValue("--view"), let v = Int(s) { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { setView(v) } }
+        if args.contains("--demo-packets") { Packets.shared.demo = true; DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { hexOpenPkts(-1, "") } }
+        if let p = argValue("--test-socket") { TestHooks.start(p) }
+    }
+    func buildMainMenu() {
+        let main = NSMenu(); let appItem = NSMenuItem(); main.addItem(appItem)
+        let am = NSMenu()
+        am.addItem(withTitle: "About MatrixSys", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        am.addItem(.separator())
+        am.addItem(withTitle: "Full Access (Install Helper)…", action: #selector(installHelper), keyEquivalent: "")
+        am.addItem(withTitle: "Uninstall Helper and Firewall Rules…", action: #selector(uninstallHelper), keyEquivalent: "")
+        am.addItem(.separator())
+        am.addItem(withTitle: "Hide MatrixSys", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        am.addItem(withTitle: "Quit MatrixSys", action: #selector(quit), keyEquivalent: "q")
+        appItem.submenu = am
+        let wItem = NSMenuItem(); main.addItem(wItem); let wm = NSMenu(title: "Window")
+        wm.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        wm.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
+        wm.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f").keyEquivalentModifierMask = [.command, .control]
+        wItem.submenu = wm
+        NSApp.mainMenu = main
+    }
+    // ---- status item (the counterpart of the Windows tray icon)
+    func setupStatusItem() {
+        status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        status.button?.image = AppDelegate.octaImage(); status.button?.image?.isTemplate = true
+        status.button?.toolTip = "MatrixSys"
+        menu.delegate = self; status.menu = menu
+    }
+    func menuNeedsUpdate(_ m: NSMenu) {
+        m.removeAllItems()
+        let visible = window.isVisible
+        m.addItem(withTitle: visible ? "Hide MatrixSys Window" : "Show MatrixSys Window", action: #selector(toggleWindow), keyEquivalent: "")
+        let (st, _) = captureStatus()
+        let si = NSMenuItem(title: "Capture: " + (st.isEmpty ? "off — counters only (no helper)" : st.replacingOccurrences(of: "● ", with: "")), action: nil, keyEquivalent: ""); si.isEnabled = false; m.addItem(si)
+        m.addItem(.separator())
+        let k = NSMenuItem(title: "Keep Running in Menu Bar When Window Closes", action: #selector(toggleKeep), keyEquivalent: ""); k.state = keepInMenuBar ? .on : .off; m.addItem(k)
+        let l = NSMenuItem(title: "Start at Login (in the Menu Bar)", action: #selector(toggleLogin), keyEquivalent: ""); l.state = LoginItem.enabled ? .on : .off; m.addItem(l)
+        m.addItem(.separator())
+        if !Model.shared.helperConnected { m.addItem(withTitle: "Full Access (Install Helper)…", action: #selector(installHelper), keyEquivalent: "") }
+        m.addItem(withTitle: "Uninstall Helper and Firewall Rules…", action: #selector(uninstallHelper), keyEquivalent: "")
+        m.addItem(.separator())
+        m.addItem(withTitle: "Quit MatrixSys", action: #selector(quit), keyEquivalent: "q")
+        for i in m.items { i.target = self }
+    }
+    static func octaImage() -> NSImage {
+        let img = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { r in
+            let c = NSPoint(x: 9, y: 9); let p = NSBezierPath(); p.lineWidth = 1.3
+            let top = NSPoint(x: 9, y: 16.5), bot = NSPoint(x: 9, y: 1.5), l = NSPoint(x: 2, y: 9.5), rr = NSPoint(x: 16, y: 8.5), f = NSPoint(x: 7, y: 7.5), b = NSPoint(x: 11.5, y: 10.5)
+            for (a, z) in [(top, l), (top, rr), (top, f), (top, b), (bot, l), (bot, rr), (bot, f), (bot, b), (l, f), (f, rr), (rr, b), (b, l)] { p.move(to: a); p.line(to: z) }
+            NSColor.black.setStroke(); p.stroke(); _ = c; _ = r; return true
+        }
+        return img
+    }
+    @objc func toggleWindow() { if window.isVisible { window.orderOut(nil); G.view?.isPaused = true } else { showWindow() } }
+    func showWindow() { G.view?.isPaused = false; window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    @objc func toggleKeep() { keepInMenuBar.toggle(); UserDefaults.standard.set(true, forKey: "keepAsked") }
+    @objc func toggleLogin() { LoginItem.set(!LoginItem.enabled) }
+    @objc func installHelper() { showWindow(); Helper.offerInstall() }
+    @objc func uninstallHelper() { Helper.uninstall() }
+    @objc func quit() { NSApp.terminate(nil) }
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if !UserDefaults.standard.bool(forKey: "keepAsked") {
+            let a = NSAlert(); a.messageText = "Keep MatrixSys running in the menu bar?"
+            a.informativeText = "Closing the window can leave MatrixSys in the menu bar (the cube icon), where you can reopen it. You can change this later from that menu."
+            a.addButton(withTitle: "Keep in Menu Bar"); a.addButton(withTitle: "Quit When Closed")
+            keepInMenuBar = a.runModal() == .alertFirstButtonReturn; UserDefaults.standard.set(true, forKey: "keepAsked")
+        }
+        if keepInMenuBar { window.orderOut(nil); G.view?.isPaused = true; return false }
+        NSApp.terminate(nil); return false
+    }
+    func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows: Bool) -> Bool { showWindow(); return true }
+    func applicationWillTerminate(_ n: Notification) { Packets.shared.close() }
+}
+
+/// "Start at login" for the app (separate from the boot-time helper): a per-user LaunchAgent that opens it in the menu bar.
+enum LoginItem {
+    static var plist: String { NSHomeDirectory() + "/Library/LaunchAgents/com.matrixsys.app.plist" }
+    static var enabled: Bool { FileManager.default.fileExists(atPath: plist) }
+    static func set(_ on: Bool) {
+        if on {
+            let exe = Bundle.main.executablePath ?? CommandLine.arguments[0]
+            let d: NSDictionary = ["Label": "com.matrixsys.app", "ProgramArguments": [exe, "--menubar"], "RunAtLoad": true, "ProcessType": "Interactive", "LimitLoadToSessionType": "Aqua"]
+            try? FileManager.default.createDirectory(atPath: (plist as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            d.write(toFile: plist, atomically: true)
+            toast("MatrixSys will start in the menu bar when you log in", .safe)
+        } else { try? FileManager.default.removeItem(atPath: plist); toast("MatrixSys will no longer start at login", .safe) }
+    }
+}
+
+// ================================================================ test hooks: drive the app from a script, only when asked for
+enum TestHooks {
+    static var waiting: [String: Int32] = [:]
+    static func start(_ path: String) {
+        unlink(path)
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        var a = sockaddr_un(); a.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &a.sun_path) { p in _ = path.utf8CString.withUnsafeBytes { memcpy(p.baseAddress!, $0.baseAddress!, min(p.count - 1, $0.count)) } }
+        let ok = withUnsafePointer(to: &a) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        if ok != 0 { NSLog("test socket bind failed"); return }
+        chmod(path, 0o600); listen(fd, 8)
+        Thread {
+            while true {
+                let c = accept(fd, nil, nil); if c < 0 { continue }
+                let rd = LineReader(fd: c)
+                guard let line = rd.next() else { close(c); continue }
+                DispatchQueue.main.async { handle(line, c) }
+            }
+        }.start()
+    }
+    static func reply(_ c: Int32, _ s: String) { _ = writeAll(c, s + "\n"); close(c) }
+    static func shotFinished(_ p: String, _ ok: Bool) { if let c = waiting.removeValue(forKey: p) { reply(c, ok ? "ok " + p : "fail") } }
+    static func handle(_ line: String, _ c: Int32) {
+        let f = line.split(separator: " ", maxSplits: 1).map(String.init); let cmd = f.first ?? ""; let a = f.count > 1 ? f[1] : ""
+        let v = G.view!
+        switch cmd {
+        case "shot": waiting[a] = c; G.gfx?.pendingShot = a; return
+        case "view": setView(Int(a) ?? 0)
+        case "select": if let p = Int32(a) { if view != 0 && !["1", "3"].contains(String(view)) { setView(0, "p:\(p)") } else { selectKey((view == 1 ? "n:" : view == 3 ? "f:" : "p:") + "\(p)") } }
+        case "key":
+            let codes: [String: UInt16] = ["esc": 53, "up": 126, "down": 125, "left": 123, "right": 124, "pgup": 116, "pgdn": 121, "home": 115, "end": 119, "enter": 36, "bs": 51]
+            if let k = codes[a] { v.handleKey(code: k, chars: "", mods: []) } else { v.handleKey(code: 0, chars: a, mods: []) }
+        case "type": for ch in a { v.handleKey(code: 0, chars: String(ch), mods: []) }
+        case "move": let p = a.split(separator: " ").compactMap { Float($0) }; if p.count == 2 { UIS.mouseX = p[0]; UIS.mouseY = p[1] }
+        case "click": let p = a.split(separator: " ").compactMap { Float($0) }; if p.count == 2 { UIS.mouseX = p[0]; UIS.mouseY = p[1]; UIS.clickNow = true }
+        case "zoom": camDist = max(6, min(1500, Float(a) ?? camDist)); flyDist = camDist
+        case "orbit": let p = a.split(separator: " ").compactMap { Float($0) }; if p.count == 2 { camYaw = p[0]; camPitch = p[1] }
+        case "act": requestAction(a)
+        case "confirm": if cf.open { cf.open = false; performAction(cf.key) }
+        case "key2": selectKey(a)
+        case "winsec": winSec = Int(a) ?? 1
+        case "state":
+            let L = LY[view]
+            reply(c, "menubar=\((NSApp.delegate as? AppDelegate)?.status?.button != nil) view=\(view) sel=\(sel) hex=\(hexMode) nodes=\(L.nodes.count) lanes=\(L.lanes.count) parts=\(parts.count) procs=\(S?.procs.count ?? 0) conns=\(S?.conns.count ?? 0) helper=\(Model.shared.helperConnected) capture=\(Model.shared.captureLive) cam=\(camDist) confirm=\(cf.open ? cf.title : "-") toast=\(toastMsg) ext=\(L.ext)")
+            return
+        case "panel": buildPanel(); reply(c, pitems.map { "\($0.type)|\($0.a)|\($0.b)|\($0.sel)" }.joined(separator: "\n")); return
+        default: reply(c, "unknown"); return
+        }
+        reply(c, "ok")
+    }
+}
+
+// ================================================================ entry
+if args.contains("--service-console") || args.contains("--install-helper") || args.contains("--uninstall") {
+    Helper.cli(args)
+    exit(0)
+}
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.setActivationPolicy(.regular)
+app.run()

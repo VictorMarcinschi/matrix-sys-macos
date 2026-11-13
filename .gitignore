@@ -1,0 +1,8 @@
+# build output (scripts/build.sh regenerates all of it)
+build/
+
+# the original Windows app this port was made from — kept locally for reference, not published
+windows-reference/
+
+# macOS
+.DS_Store
