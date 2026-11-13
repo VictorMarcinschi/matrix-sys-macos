@@ -98,10 +98,16 @@ While a list window is open, every key belongs to that list.
 
 APFS volumes in one container share free space, so free space is shown **once per container**, not summed.
 The read-only System volume and the Data volume are joined by firmlinks; the scan never crosses a device boundary,
-so nothing is counted twice. Sizes are **allocated** sizes, so clones and sparse files do not inflate totals, and
+so nothing is counted twice. Sizes are **allocated** sizes (`st_blocks`), so sparse files do not inflate totals, and
 hard-linked files are counted once. Symlinks are never followed, network volumes and system-managed APFS volumes
 (Preboot, VM, Update, xART) are not walked. Whatever a volume uses beyond the scanned folders — local Time Machine
 snapshots, purgeable space, metadata, unreadable folders — is shown as its own block rather than hidden.
+
+**APFS clones are the one case the folder sizes overstate.** A clone reports its full allocated size even though it
+shares blocks with its twin, so the sum over files can exceed what the volume actually uses — on the machine this was
+developed on, 364 GB of folders against 340 GB in use. Counting shared blocks once would mean tracking every extent
+in the container, which this scan deliberately does not do. The panel always shows the volume's own **in use on the
+volume** figure next to the scanned total, so the two can be compared instead of one being passed off as the other.
 
 ## Building from source
 
