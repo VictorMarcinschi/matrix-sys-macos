@@ -21,6 +21,12 @@ The app is **signed ad hoc** (no Developer ID). The first launch is therefore re
 
 Only the first launch needs this.
 
+Ad-hoc signing has one further consequence, confirmed in practice: macOS ties a TCC permission to the
+*exact binary*, so **rebuilding or replacing the app voids its Full Disk Access** even when the path is
+unchanged. After an update, switch the entry off and on again in the Full Disk Access list, or remove it
+with **−** and drag the new app in. Signing with a Developer ID avoids this. The privileged helper is
+unaffected: it is a separate binary and keeps running across app updates.
+
 ## The three levels of access
 
 | Level | How | What you get |
