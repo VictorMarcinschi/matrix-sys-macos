@@ -1,0 +1,31 @@
+name: Bug report
+description: Something shows the wrong thing, or does not work
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations: { required: true }
+  - type: input
+    id: version
+    attributes:
+      label: macOS version and Mac model
+      placeholder: "macOS 15.1, M1 Pro"
+    validations: { required: true }
+  - type: dropdown
+    id: helper
+    attributes:
+      label: Was the privileged helper running?
+      options: ["No — unprivileged", "Yes — until restart", "Yes — at boot", "Not sure"]
+    validations: { required: true }
+  - type: input
+    id: view
+    attributes:
+      label: Which view
+      placeholder: "Processes / Network / Files / Disks / Devices / Memory / Trace"
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: A screenshot of the app's window, or the output of `MatrixSys --trace-dump <target>` for a trace problem.

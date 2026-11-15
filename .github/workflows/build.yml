@@ -1,0 +1,66 @@
+name: build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: swift --version && xcodebuild -version
+      - name: Build app, helper and disk image
+        run: scripts/build.sh --dmg
+      - name: Smoke test (no window)
+        run: |
+          # the trace engine end to end: name lookup, route, TLS, HTTP
+          ./build/MatrixSys.app/Contents/MacOS/MatrixSys --trace-dump https://example.com https | tee /tmp/trace.txt
+          grep -q "Secure channel ready" /tmp/trace.txt
+          grep -q "HTTP/1.1 200" /tmp/trace.txt
+      - name: Package
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent build/MatrixSys.app dist/MatrixSys-macOS.zip
+          cp build/MatrixSys.dmg dist/MatrixSys.dmg
+          cd dist && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MatrixSys-macOS
+          path: dist/*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: MatrixSys-macOS, path: dist }
+      - name: Release notes
+        id: notes
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [ -f "docs/releases/$TAG.md" ]; then cp "docs/releases/$TAG.md" notes.md; else echo "## $TAG" > notes.md; fi
+          cat >> notes.md <<'EOF'
+
+          ### Before you open it
+
+          The app is signed ad hoc, not with a Developer ID, and it is not notarized. The first launch is therefore
+          refused by Gatekeeper: right-click the app → **Open** → **Open**, or allow it in
+          System Settings → Privacy & Security. Only the first launch needs this.
+
+          Rebuilding or replacing an ad-hoc signed app voids any Full Disk Access it was granted, because macOS ties
+          a TCC permission to the exact binary. After an update, switch the entry off and on again in the Full Disk
+          Access list.
+          EOF
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: notes.md

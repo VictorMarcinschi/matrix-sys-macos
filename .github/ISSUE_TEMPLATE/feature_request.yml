@@ -1,0 +1,19 @@
+name: Feature request
+description: Something MatrixSys could show or do
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you would like to see
+    validations: { required: true }
+  - type: textarea
+    id: where
+    attributes:
+      label: Where the data would come from
+      description: >
+        MatrixSys only shows what it can actually measure on macOS. If you know the interface
+        (a sysctl, an IOKit property, a command), say so — it makes the difference between a feature and a guess.
+  - type: textarea
+    id: why
+    attributes:
+      label: What you would use it for
