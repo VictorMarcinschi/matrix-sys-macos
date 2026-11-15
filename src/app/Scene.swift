@@ -23,7 +23,7 @@ func svcName(_ p: Int) -> String { SVC[p] ?? "" }
 func protoName(_ p: Int) -> String { p == 6 ? "TCP" : p == 17 ? "UDP" : p == 1 ? "ICMP" : p == 58 ? "ICMPv6" : "IP" }
 
 enum Shape: Int { case octa = 0, ico, box, tetra }
-enum Kind { case proc, hubnet, hubio, pc, port, host, group, free, other, file, disk, dir, dev, nb, vol }
+enum Kind { case proc, hubnet, hubio, pc, port, host, group, free, other, file, disk, dir, dev, nb, vol, tr }
 struct Geo { var v: [V3] = []; var e: [(Int, Int)] = []; var t: [(Int, Int, Int)] = [] }
 var GEO: [Geo] = []
 func buildGeo() {
@@ -74,7 +74,29 @@ final class Layer {
 }
 
 // ================================================================ app state
-var LY: [Layer] = (0..<6).map { _ in Layer() }
+var LY: [Layer] = (0..<7).map { _ in Layer() }   // 0 processes, 1 network, 2 memory, 3 files, 4 disks, 5 devices, 6 trace
+// Layout memory, so that one process appearing or leaving does not re-pack the whole scene.
+var procKAng: [Int: (Int, Float)] = [:]                                   // child pid -> (parent pid, its angle on that parent's ring)
+var procFloor: [Int: (x: Float, z: Float, r: Float, ord: Int)] = [:]      // root pid -> where its tree stands on the floor
+var procFloorOrd = 0
+var netPAng: [Int32: Float] = [:], netHAng: [String: Float] = [:]         // process and remote-host angles on the Network rings
+var netRp: Float = 0, netRh: Float = 0                                    // ring radii, kept until clearly too wide
+/// Pushes apart only the neighbours on a ring that are closer than minGap, by just what is missing; nobody else moves.
+func relaxRing<K: Hashable>(_ a: inout [K: Float], _ minGap: Float) {
+    if a.count < 2 { return }
+    let TAU: Float = 6.2832
+    for _ in 0..<40 {
+        let v = a.map { (fmodf(fmodf($0.value, TAU) + TAU, TAU), $0.key) }.sorted { $0.0 < $1.0 }
+        var moved = false
+        for i in 0..<v.count {
+            let p = v[i], q = v[(i + 1) % v.count]
+            var d = q.0 - p.0; if i + 1 == v.count { d += TAU }
+            if d < minGap - 1e-4 { let push = (minGap - d) * 0.5; a[p.1]! -= push; a[q.1]! += push; moved = true }
+        }
+        if !moved { break }
+    }
+    for k in a.keys { a[k] = fmodf(fmodf(a[k]!, TAU) + TAU, TAU) }
+}
 var parts: [Part] = []
 var S: Snapshot? = nil
 var hist: [Snapshot] = []
@@ -111,7 +133,21 @@ func project(_ p: V3) -> (Float, Float)? {
     let c = VP * SIMD4(p.x, p.y, p.z, 1); if c.w <= 0.05 { return nil }
     return ((c.x / c.w * 0.5 + 0.5) * G.LW, (1 - (c.y / c.w * 0.5 + 0.5)) * G.LH)
 }
-func procSize(_ p: ProcInfo) -> Float { min(2.1, max(0.5, 0.5 + log10(1 + Float(p.rss) / 1048576) * 0.5)) }
+let NCPU = Float(max(1, ProcessInfo.processInfo.activeProcessorCount))
+/// What the size of a process in the Processes view stands for: 0 memory, 1 lane traffic, 2 CPU load.
+var procSizeMode = 0
+func procSize(_ p: ProcInfo, _ mode: Int = 0) -> Float {
+    var v: Float
+    switch mode {
+    case 1: let r = procRate(p.pid)                                   // everything its lanes carry: disk and network
+            v = log10(1 + Float(r.rd + r.wr + r.nin + r.nout) / 1024) * 0.32      // 1 MB/s is about 1.5, 100 MB/s reaches the cap
+    case 2: v = sqrt(max(0, Float(p.cpu) / NCPU)) * 0.35              // ps gives percent of one core; the curve wants percent of the machine
+    default: v = log10(1 + Float(p.rss) / 1048576) * 0.5
+    }
+    return min(2.1, max(0.5, 0.5 + v))
+}
+/// CPU as a share of the whole machine, which is what the panel and the list show.
+func cpuAll(_ p: ProcInfo) -> Double { p.cpu / Double(NCPU) }
 func procRate(_ pid: Int32) -> (rd: Double, wr: Double, nin: Double, nout: Double) { S?.rate[pid] ?? (0, 0, 0, 0) }
 
 @discardableResult
@@ -207,6 +243,7 @@ func buildProc() {
     for e in ex.sorted() { sig = (sig ^ (UInt64(e) &* 31 &+ 17)) &* 1099511628211 }
     if exRoots { sig = (sig ^ 0x9e37) &* 1099511628211 }
     if sig != L.sig {
+        let prev = L.lay                                  // the previous layout: the hysteresis below is measured against it
         L.lay = [:]; let LEAF: Float = 1.9, LEVEL: Float = 10
         func ringR(_ sum: Float, _ m: Float, _ s2: Float, _ n: Int, _ spine: inout Bool, _ R: inout Float) -> Float {
             spine = n >= 2 && m > LEAF * 2.5
@@ -223,50 +260,130 @@ func buildProc() {
                 if ko.er > mx { sec = mx; mx = ko.er; big = k } else { sec = max(sec, ko.er) }
                 sum0 += ko.r0 * 2; if ko.r0 > mx0 { sec0 = mx0; mx0 = ko.r0 } else { sec0 = max(sec0, ko.r0) }
             }
+            // A sibling that grows a little past the current spine child does not take its place: that would swap two whole subtrees.
+            if let pv = prev[pid], pv.spine, pv.big >= 0, pv.big != big, ks.contains(pv.big), let ob = L.lay[pv.big], ob.er >= mx * 0.7 {
+                big = pv.big; mx = ob.er; sec = 0
+                for k in ks where k != big { sec = max(sec, L.lay[k]?.er ?? 0) }
+            }
             if !ks.isEmpty {
                 var sp = false, sp0 = false, R0: Float = 0
                 o.r = ringR(o.sum, mx, sec, ks.count, &sp, &o.R)
                 if sp { o.spine = true; o.big = big; o.sum -= mx * 2 }
                 o.r0 = ringR(sum0, mx0, sec0, ks.count, &sp0, &R0)
+                // The ring grows at once but only shrinks when it is clearly too wide, so one process leaving does not pull it in.
+                if let pv = prev[pid], ks.count >= 2, pv.spine == o.spine, pv.R >= o.R, pv.R <= o.R * 1.25 { o.r += pv.R - o.R; o.R = pv.R }
             }
             L.lay[pid] = o; return o
         }
         func place(_ pid: Int, _ at: V3) {
             guard var o = L.lay[pid] else { return }
             o.pos = at; L.lay[pid] = o
-            var a = Float(fnv(String(pid)) % 628) / 100; let R = o.R, sum = o.sum
+            var a = Float(fnv(String(pid)) % 628) / 100; let R = o.R, sum = max(o.sum, 0.001)
+            let ks = L.kids[pid] ?? []
             let big = o.spine ? o.big : -1
             if big >= 0 { place(big, V3(at.x, at.y + LEVEL, at.z)) }
-            for k in L.kids[pid] ?? [] where k != big {
-                let half = (L.lay[k]?.er ?? 1.9) * 2 / max(sum, 0.001) * .pi
-                a += half; place(k, V3(at.x + R * cos(a), at.y + LEVEL, at.z + R * sin(a))); a += half
+            let ring = ks.filter { $0 != big }; let n = ring.count
+            if n == 0 { return }
+            var A = [Float](repeating: 0, count: n), hw = [Float](repeating: 0, count: n)
+            var known = [Bool](repeating: false, count: n); var nk = 0
+            for i in 0..<n {
+                let er = L.lay[ring[i]]?.er ?? LEAF
+                let half = er * 2 / sum * .pi
+                a += half; A[i] = a; a += half
+                hw[i] = R > 0 ? er / R * 1.05 : 0
+                if let m = procKAng[ring[i]], m.0 == pid { known[i] = true; nk += 1 }
+            }
+            if nk > 0 && R > 0 {
+                for i in 0..<n where known[i] { A[i] = procKAng[ring[i]]!.1 }
+                var s0 = 0; while !known[s0] { s0 += 1 }   // walk the ring from a known child; each newcomer sits right after the one before it
+                if n > 1 { for t in 1..<n { let i = (s0 + t) % n, p = (s0 + t - 1) % n; if !known[i] { A[i] = A[p] + hw[p] + hw[i] } } }
+                if n > 1 { for _ in 0..<60 {   // then push apart only the pairs that actually overlap
+                    for i in 0..<n { A[i] = fmodf(fmodf(A[i], 6.2832) + 6.2832, 6.2832) }
+                    let ord = (0..<n).sorted { A[$0] < A[$1] }
+                    var mv = false
+                    for j in 0..<n {
+                        let p = ord[j], q = ord[(j + 1) % n]
+                        var d = A[q] - A[p]; if j + 1 == n { d += 6.2832 }
+                        let need = hw[p] + hw[q]
+                        if d < need - 1e-4 { let push = (need - d) * 0.5; A[p] -= push; A[q] += push; mv = true }
+                    }
+                    if !mv { break }
+                } }
+            }
+            let wide = ex.contains(pid)   // an expanded ring is temporary: it is never remembered
+            for i in 0..<n {
+                if !wide { procKAng[ring[i]] = (pid, A[i]) }
+                place(ring[i], V3(at.x + R * cos(A[i]), at.y + LEVEL, at.z + R * sin(A[i])))
             }
         }
         for r in roots { _ = measure(r) }
-        roots.sort { let ra = L.lay[$0]!.r0, rb = L.lay[$1]!.r0; return ra != rb ? ra > rb : $0 < $1 }
-        // golden-angle spiral packing with a coarse grid so the search stays fast
+        var livePids = Set<Int>(); for p in S.procs { livePids.insert(Int(p.pid)) }
+        let rootSet = Set(roots)
+        procKAng = procKAng.filter { livePids.contains($0.key) }          // a process that is gone drops its remembered angle
+        procFloor = procFloor.filter { rootSet.contains($0.key) }         // and its spot on the floor
+        // known trees first, in the order they were first placed, then new trees, biggest first
+        roots.sort {
+            let ma = procFloor[$0], mb = procFloor[$1]
+            if (ma != nil) != (mb != nil) { return ma != nil }
+            if let ma = ma, let mb = mb { return ma.ord < mb.ord }
+            let ra = L.lay[$0]!.r0, rb = L.lay[$1]!.r0; return ra != rb ? ra > rb : $0 < $1
+        }
         struct P { var x: Float, z: Float, r: Float }
         var placed: [P] = []; L.ext = 60
-        var grid: [Int64: [Int]] = [:]; let cell: Float = 24
+        var grid: [Int64: [Int]] = [:]; let cell: Float = 24; var maxR: Float = 0
         func gk(_ x: Int, _ z: Int) -> Int64 { Int64(x) << 32 | Int64(UInt32(bitPattern: Int32(z))) }
-        var maxR: Float = 0
+        func freeAt(_ x: Float, _ z: Float, _ r: Float) -> Bool {
+            let reach = r + maxR + 2.5
+            let gx0 = Int(floor((x - reach) / cell)), gx1 = Int(floor((x + reach) / cell))
+            let gz0 = Int(floor((z - reach) / cell)), gz1 = Int(floor((z + reach) / cell))
+            for gx in gx0...gx1 { for gz in gz0...gz1 { for qi in grid[gk(gx, gz)] ?? [] {
+                if hypot(placed[qi].x - x, placed[qi].z - z) < placed[qi].r + r + 2.5 { return false } } } }
+            return true
+        }
+        var at: [Int: V3] = [:]
         for pid in roots {
-            let r = L.lay[pid]!.r0 + (exRoots ? 4 : 0); var x: Float = 0, z: Float = 0; var found = false
-            var k = 0
-            while k < 200000 && !found {
-                let rad = sqrt(Float(k)) * 2.2, ang = Float(k) * 2.39996
-                x = rad * cos(ang); z = rad * sin(ang); found = true
-                let reach = r + maxR + 2.5
-                let gx0 = Int(floor((x - reach) / cell)), gx1 = Int(floor((x + reach) / cell)), gz0 = Int(floor((z - reach) / cell)), gz1 = Int(floor((z + reach) / cell))
-                outer: for gx in gx0...gx1 { for gz in gz0...gz1 { for qi in grid[gk(gx, gz)] ?? [] { let q = placed[qi]; if hypot(q.x - x, q.z - z) < q.r + r + 2.5 { found = false; break outer } } } }
-                k += 1
+            let r = L.lay[pid]!.r0; var x: Float = 0, z: Float = 0; var found = false
+            if let m = procFloor[pid] {   // the free spot nearest to where it stood, in rings of growing radius
+                if freeAt(m.x, m.z, r) { x = m.x; z = m.z; found = true }
+                var ring = 1
+                while ring <= 400 && !found {
+                    let d = Float(ring) * 1.5; let steps = max(8, Int(d * 1.2)); var best: Float = 1e9
+                    for s in 0..<steps {
+                        let ang = Float(s) * 6.2832 / Float(steps), cx = m.x + d * cos(ang), cz = m.z + d * sin(ang)
+                        if freeAt(cx, cz, r) { let pull = hypot(cx, cz); if pull < best { best = pull; x = cx; z = cz; found = true } }
+                    }   // of the free spots at that distance, the one nearest the centre
+                    ring += 1
+                }
+            }
+            if !found {   // a tree seen for the first time goes on the golden-angle spiral
+                var k = 0
+                while k < 200000 && !found {
+                    let rad = sqrt(Float(k)) * 2.2, ang = Float(k) * 2.39996
+                    x = rad * cos(ang); z = rad * sin(ang); found = freeAt(x, z, r); k += 1
+                }
             }
             if !found { var edge: Float = 0; for q in placed { edge = max(edge, q.x + q.r) }; x = edge + r + 3; z = 0 }   // still unique, just outside everything
+            var ord = procFloor[pid]?.ord ?? -1
+            if ord < 0 { procFloorOrd += 1; ord = procFloorOrd }
             placed.append(P(x: x, z: z, r: r)); maxR = max(maxR, r)
             let qi = placed.count - 1
             for gx in Int(floor((x - r) / cell))...Int(floor((x + r) / cell)) { for gz in Int(floor((z - r) / cell))...Int(floor((z + r) / cell)) { grid[gk(gx, gz), default: []].append(qi) } }
-            L.ext = max(L.ext, hypot(x, z) + r)
-            place(pid, V3(x, -20, z))
+            procFloor[pid] = (x: x, z: z, r: r, ord: ord)
+            at[pid] = V3(x, -20, z)
+        }
+        // A selected tree on the floor: the whole floor spreads out evenly so its neighbours make room. The remembered spots stay as they are.
+        var spread: Float = 1
+        if exRoots && placed.count > 1 {
+            for i in 0..<placed.count { for j in (i + 1)..<placed.count {
+                let d = hypot(placed[i].x - placed[j].x, placed[i].z - placed[j].z)
+                if d > 0.01 { spread = max(spread, (placed[i].r + placed[j].r + 10.5) / d) }
+            } }
+        }
+        spread = min(spread, 1.7)
+        for pid in roots {
+            var p = at[pid]!; p.x *= spread; p.z *= spread
+            L.ext = max(L.ext, hypot(p.x, p.z) + (procFloor[pid]?.r ?? 0))
+            place(pid, p)
         }
         L.sig = sig
     }
@@ -278,10 +395,10 @@ func buildProc() {
         guard let li = L.lay[Int(p.pid)] else { continue }
         let key = "p:\(p.pid)"
         let hasPar = p.ppid > 1 && L.lay[Int(p.ppid)] != nil && S.get(p.ppid) != nil
-        let n = up(L, key, .octa, .proc, li.pos, S3(procSize(p)), nameColor(p.name), hasPar ? L.lay[Int(p.ppid)]!.pos : nil)
+        let n = up(L, key, .octa, .proc, li.pos, S3(procSize(p, procSizeMode)), nameColor(p.name), hasPar ? L.lay[Int(p.ppid)]!.pos : nil)
         let hasKids = !(L.kids[Int(p.pid)] ?? []).isEmpty
         n.pid = p.pid; n.name = p.name; n.label = p.name; n.glow = 0.35 + min(1, Float(p.cpu) / 8)
-        n.lp = procSize(p) + min(2, Float(p.cpu) / 5) + (hasKids ? 0.6 : 0)
+        n.lp = procSize(p, procSizeMode) + min(2, Float(p.cpu) / 5) + (hasKids ? 0.6 : 0)
         if hasPar { lanes.append(mkLane("t:\(p.pid)", "p:\(p.ppid)", key, C_BLUE, w: 0.5, tree: true)) }
         let r = procRate(p.pid)
         if SM_remote[p.pid] != nil || r.nin + r.nout > 0 {
@@ -313,10 +430,33 @@ func buildNet() {
     for pid in SM_est.keys where S.get(pid) != nil { ps.insert(pid) }
     for pid in SM_remote.keys where S.get(pid) != nil { ps.insert(pid) }
     let pids = ps.sorted { let na = S.get($0)!.name.lowercased(), nb = S.get($1)!.name.lowercased(); return na != nb ? na < nb : $0 < $1 }
-    let N = pids.count; let Rp = max(46, Float(N) * 7.2 / 6.2832); var ang: [Int32: Float] = [:]
+    let N = pids.count
+    let rpT = max(46, Float(N) * 7.2 / 6.2832)
+    if netRp < rpT || netRp > rpT * 1.25 { netRp = rpT }       // the ring grows at once and only shrinks when clearly too big
+    let Rp = netRp; var ang: [Int32: Float] = [:]
+    let liveP = Set(pids); netPAng = netPAng.filter { liveP.contains($0.key) }
+    if netPAng.isEmpty { for (i, pid) in pids.enumerated() { netPAng[pid] = Float(i) / Float(max(1, N)) * 6.2832 } }
+    else {   // a known process keeps its angle; runs of new ones are spread over the gap between their known neighbours in name order
+        var i = 0
+        while i < N {
+            if netPAng[pids[i]] != nil { i += 1; continue }
+            var b = i; while b + 1 < N && netPAng[pids[b + 1]] == nil { b += 1 }
+            var lo = -1, hi = -1, k = 1
+            while k <= N && lo < 0 { let j = ((i - k) % N + N) % N; if netPAng[pids[j]] != nil { lo = j }; k += 1 }
+            k = 1
+            while k <= N && hi < 0 { let j = (b + k) % N; if netPAng[pids[j]] != nil { hi = j }; k += 1 }
+            if lo < 0 || hi < 0 { for j in i...b { netPAng[pids[j]] = Float(j) / Float(max(1, N)) * 6.2832 }; i = b + 1; continue }
+            let a0 = netPAng[pids[lo]]!, a1 = netPAng[pids[hi]]!
+            var gap = a1 - a0; while gap <= 0 { gap += 6.2832 }
+            if lo == hi { gap = 6.2832 }
+            for j in i...b { netPAng[pids[j]] = fmodf(a0 + gap * Float(j - i + 1) / Float(b - i + 2), 6.2832) }
+            i = b + 1
+        }
+        if N > 0 { relaxRing(&netPAng, 6.2832 / Float(N) * 0.7) }
+    }
     do { let n = up(L, "pc", .ico, .pc, V3(), S3(6), C_CYAN); n.glow = 1; n.label = S.host; n.lp = 9; n.cnt = N }
     for (i, pid) in pids.enumerated() {
-        let p = S.get(pid)!; let a = Float(i) / Float(N) * 6.2832; ang[pid] = a
+        let p = S.get(pid)!; let a = netPAng[pid] ?? Float(i) / Float(max(1, N)) * 6.2832; ang[pid] = a
         let pos = V3(Rp * cos(a), 0, Rp * sin(a)); let key = "n:\(pid)"
         let ls = SM_listen[pid] ?? [], rs = SM_remote[pid] ?? []
         let n = up(L, key, .octa, .proc, pos, S3(procSize(p) + 0.3), nameColor(p.name)); n.pid = pid; n.name = p.name; n.label = p.name
@@ -337,12 +477,20 @@ func buildNet() {
     var hosts: [String: Host] = [:]
     for (pid, rs) in SM_remote { guard let a = ang[pid] else { continue }
         for c in rs { var h = hosts[c.ra] ?? Host(); h.ip = c.ra; h.conns += 1; h.pids.insert(pid); h.sx += cos(a); h.sz += sin(a); hosts[c.ra] = h } }
-    let hl = hosts.values.sorted { atan2($0.sz, $0.sx) < atan2($1.sz, $1.sx) }
-    let Rh = max(Rp + 58, Float(hl.count) * 6 / 6.2832); L.ext = Rh
-    for (i, h) in hl.enumerated() {
-        let a0 = atan2(h.sz, h.sx), even = -Float.pi + (Float(i) + 0.5) / Float(hl.count) * 6.2832, a = hl.count > 24 ? even : a0 * 0.6 + even * 0.4
+    let hl = hosts.values.sorted { $0.ip < $1.ip }
+    let rhT = max(Rp + 58, Float(hl.count) * 6 / 6.2832)
+    if netRh < rhT || netRh > rhT * 1.25 { netRh = rhT }
+    let Rh = netRh; L.ext = Rh
+    // a host keeps its angle; a new one appears beside the processes that talk to it
+    var keepH: [String: Float] = [:]
+    for h in hl { keepH[h.ip] = netHAng[h.ip] ?? (atan2(h.sz, h.sx) + (h.sx == 0 && h.sz == 0 ? Float(fnv(h.ip) % 628) / 100 : 0)) }
+    netHAng = keepH
+    if !hl.isEmpty { relaxRing(&netHAng, 6.2832 / Float(hl.count) * 0.6) }
+    for h in hl {
+        let a = netHAng[h.ip] ?? 0
         let priv = isPrivate(h.ip)
-        let n = up(L, "host:" + h.ip, .ico, .host, V3(Rh * cos(a), 16 + Float(i % 3) * 11, Rh * sin(a)), S3(1.3 + min(2, Float(h.conns) * 0.25)), priv ? C_SAFE : C_CYAN)
+        // the height level comes from the address, not from a place in a sorted list, so a new neighbour does not move it
+        let n = up(L, "host:" + h.ip, .ico, .host, V3(Rh * cos(a), 16 + Float(fnv(h.ip) % 3) * 11, Rh * sin(a)), S3(1.3 + min(2, Float(h.conns) * 0.25)), priv ? C_SAFE : C_CYAN)
         n.glow = 0.7; n.label = h.ip; n.s1 = h.ip; n.cnt = h.conns; n.more = h.pids.count; n.lp = 0.8 + Float(h.conns) * 0.2
     }
     for (pid, rs) in SM_remote {
@@ -571,12 +719,21 @@ func rebuild() {
         capPps = Int(n / dts); capAcc = [:]; capAccT = t
     }
     buildSM(); capDirty = false
-    switch view { case 0: buildProc(); case 1: buildNet(); case 3: buildFiles(); case 4: buildDisks(); case 5: buildDevs(); default: buildRam() }
+    switch view { case 0: buildProc(); case 1: buildNet(); case 3: buildFiles(); case 4: buildDisks(); case 5: buildDevs(); case 6: buildTrace(); default: buildRam() }
     computeFocus()
     let L = LY[view]
     if !L.framed && L.ext > 0 {
         L.framed = true
-        if sel.isEmpty { flyT = V3(0, view == 2 || view == 4 ? -20 : 10, 0); flyDist = min(1500, L.ext * (view == 2 || view == 4 ? 1.9 : view == 1 || view == 3 ? 1.8 : 1.15)); flying = true }
+        if sel.isEmpty {
+            flyT = V3(0, view == 2 || view == 4 ? -20 : 10, 0)
+            flyDist = min(1500, L.ext * (view == 2 || view == 4 ? 1.9 : view == 1 || view == 3 ? 1.8 : 1.15))
+            if view == 6 {   // the chain is framed in the part of the window the panel leaves free
+                let pf = min(Float(0.6), (min(500, G.LW * 0.46) + 24) / G.LW), kx = tan(FOV / 2) * G.LW / G.LH
+                flyDist = max(120, L.ext / ((1 - pf) * 0.86 * kx))
+                flyT = V3(pf * kx * flyDist, 4, 0)
+            }
+            flying = true
+        }
     }
 }
 func selectKey(_ key: String, fly: Bool = true) {
@@ -592,8 +749,10 @@ func selectKey(_ key: String, fly: Bool = true) {
         return
     }
     if key == "hexports" { hexClose(); hexMode = 3; portScroll = 0; listCur = 0; return }
-    if key == "hexlanes" { hexClose(); hexMode = 4; portScroll = 0; listCur = 0; return }
+    if key.hasPrefix("size:") { procSizeMode = max(0, min(2, Int(key.dropFirst(5)) ?? 0)); rebuild(); return }
+    if key == "hexlanes" { hexClose(); if procSizeMode == 2 { laneSort = 4 } else if laneSort == 4 { laneSort = 0 }; hexMode = 4; portScroll = 0; listCur = 0; return }
     if key == "dkrescan" { Disks.shared.rescanAll(); diskRoot = ""; sel = ""; return }
+    if view == 6 { sel = key; if !key.isEmpty { trSel = -1 }; trDetScroll = 0; computeFocus(); return }
     sel = key
     if S != nil { switch view { case 0: buildProc(); case 2: buildRam(); case 3: buildFiles(); case 4: buildDisks(); default: break } }
     computeFocus()
@@ -706,6 +865,7 @@ func frameScene(_ dt: Float) {
     VP = perspectiveRH(FOV, G.LW / G.LH, 0.5, 4000) * lookAtRH(camEye, camT, V3(0, 1, 0))
     pickHover()
     let g = G.gfx!
+    if view == 6 { trSync(); trOrbs(dt) } else if TrShared.i.version() != trVer { trSync() }
     // grid
     for pass in 0..<2 {
         let div = pass == 1 ? 240 : 60; let c = pass == 1 ? hex(0x0f5c9a) : hex(0x1b8fd6); let f: Float = pass == 1 ? 0.12 : 0.32, y: Float = -32, h: Float = 1200

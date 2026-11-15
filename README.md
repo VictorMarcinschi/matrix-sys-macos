@@ -9,6 +9,17 @@ only when you press its button.
 
 ---
 
+## Getting it
+
+Download `MatrixSys.dmg` from the **Releases** page of this repository, or build it yourself:
+
+```
+scripts/build.sh --dmg
+```
+
+Every push is built and smoke-tested on a macOS runner; pushing a `v*` tag publishes a release with the disk image,
+a zipped app and `SHA256SUMS`.
+
 ## Running it
 
 Drag **MatrixSys.app** to Applications and open it.
@@ -53,7 +64,7 @@ connection is checked: only root, the console user and members of the `admin` gr
 
 MatrixSys asks for no other permission, and sends nothing anywhere.
 
-## The six views
+## The seven views
 
 * **Processes** — the process tree as a 3D cone tree, children above their parent, size = memory, glow = CPU.
   Lanes show data exchange: network, disk, and the pipes, unix sockets and loopback TCP between processes.
@@ -63,9 +74,58 @@ MatrixSys asks for no other permission, and sends nothing anywhere.
 * **Files** — which process has which files open; files held by several processes are highlighted.
 * **Disks** — every volume and its folders as a treemap. APFS containers show their shared free space once.
 * **Devices** — the IOKit hardware tree, plus network neighbours (ARP/NDP) and gateways hanging off their interface.
+* **Trace** — type a host, an IP or a URL and watch every step between this Mac and it: the name lookup, each router
+  on the way, and the conversation in the chosen protocol. See below.
 
 Every node has a tooltip. All "how much data" figures are for a time window of 1, 5, 10, 30 or 60 seconds,
 changed with the buttons in the panel or the `[` and `]` keys.
+
+In **Processes**, *SIZE PROCESSES BY* switches what a node's size stands for: **memory** (default), **lane traffic**
+(everything its lanes carry, disk and network) or **CPU load**. In CPU mode the panel lists CPU now instead of traffic
+over a window, as a share of the whole machine; the process list gains a CPU% column and a CPU sort.
+
+Layouts are **stable**: a process appearing or leaving does not re-pack the scene. Each tree keeps its spot on the
+floor, each child keeps its angle on its parent's ring, and a ring only shrinks when it is clearly too wide. Measured
+on this Mac over a minute of normal churn: before, a single rebuild moved a node up to 232 units in Processes and 37
+in Network; after, 0 and 4.6.
+
+## The Trace tab
+
+Type a host name, an IPv4 address or a URL, pick **ICMP / TCP / HTTP / HTTPS / DNS**, and press Enter. A scheme in the
+address picks the protocol by itself (`https://`, `ssh://`, `dns://8.8.8.8/example.com`, `icmp://1.1.1.1`, …).
+
+Every request leaves as a magenta orb and every answer comes back in the colour of its kind — violet DNS, amber router
+reply, cyan echo, blue TCP, green TLS and HTTP success, yellow redirect, red error or silence, white greeting. Click an
+orb, a node or a row in the step list to see that message fully decoded, with the bytes that were on the wire.
+
+| Step | What you see |
+|---|---|
+| Name lookup | Raw DNS over UDP straight to the servers this Mac is configured to use, so the exchange itself is visible: query and answer decoded (A, AAAA, CNAME, NS, PTR, MX, TXT, SOA, flags, rcode, per-record TTL). If they cannot answer, the system resolver is asked instead and says so. |
+| Route | ICMP echo with a rising TTL, 1 to 30. Each hop is a node with its round trip; a router that forwards but does not answer appears as a small dark "* hop N". |
+| ICMP | Four pings, with what the reply's TTL suggests about the far end, and a min / avg / max summary. |
+| TCP | Connect (open, refused, or filtered), then the greeting of a server that speaks first — SSH, SMTP, FTP, POP3, IMAP, VNC, MySQL. Then FIN. |
+| HTTPS | Each TLS flight as its own message with its records named and the hellos decoded (SNI, marked as sent unencrypted; ALPN; offered versions; chosen suite), then the negotiated parameters, the certificate chain, its validity and names, and a trust verdict. |
+| HTTP | A plain GET, every response header as a field, chunked decoding, the body up to 512 KB, time to first byte, and up to 5 redirects followed. |
+| DNS | The route to the DNS server, then every record type of the name; a PTR lookup for an IP. |
+
+**Two run modes.** Enter runs the trace at network speed and then replays it. **Shift+Enter** runs it step by step:
+nothing is sent until you press `→`, which allows exactly one real network step; `Space` switches to live, where each
+step happens as the replay reaches it. Time spent waiting is subtracted from every timing. `←` walks back.
+During a replay, `Space` pauses and `←` `→` step one message at a time.
+
+**This sends real packets to the target**: about 30 ICMP probes for the route, then the protocol exchange. Nothing
+else leaves this Mac; there is no telemetry, and the owner (whois) lookup still happens only when you press its button.
+
+### The rendered page
+
+When a response is HTML, the panel offers **RENDERED PAGE**: the captured bytes shown in a WKWebView, never fetched
+again. Switches, all off by default except the guard: **JAVASCRIPT**, **COOKIES** (a non-persistent store, emptied
+with the view), **LOAD RESOURCES** (off: nothing but the captured document leaves this Mac), **OTHER SITES** (only
+with resources on), **XSS GUARD** (on: a `script-src 'self'` policy on top of the site's own).
+
+Always blocked: every navigation after the first — links, forms, script redirects — plus new windows, downloads,
+permission prompts (camera, microphone, location, notifications), script dialogs and autofill. A blocked http(s) link
+is put into the TARGET box so you can trace it instead.
 
 ### Controls
 
@@ -92,6 +152,11 @@ While a list window is open, every key belongs to that list.
 | Process memory viewer | Needs `task_for_pid`, which macOS grants only to root **and** refuses for Apple's own programs and hardened-runtime apps while SIP is on. Realistic coverage: your own programs and third-party apps without the hardened runtime. For the rest the viewer says exactly why. |
 | Recycle Bin | **Trash** (`FileManager.trashItem`), and EMPTY TRASH via Finder. |
 | Priority: five Windows classes | nice levels −10…19 (raising priority needs the helper). |
+| Trace: ICMP route needs raw sockets / an elevated service | **No helper needed.** macOS gives any process `SOCK_DGRAM`/`IPPROTO_ICMP`, which carries both echo replies and the "time exceeded" errors a traceroute needs. The TTL is set with `IP_TTL` and the reply's own TTL read with `IP_RECVTTL`. |
+| Trace: TLS handshake through Schannel, record by record | macOS's TLS is **Network.framework**, which does not hand out raw records. MatrixSys inserts a pass-through **`NWProtocolFramer` below TLS** in the protocol stack, so it sees every byte of the handshake in both directions and hands them on untouched, while Apple's stack does the cryptography and the trust evaluation. The flights, the hellos, the certificate chain and the verdict are all real; nothing is reimplemented. A direction change ends a flight, which is why ClientHello, ServerHello and the client's Finished appear as three messages. |
+| Trace: DNS servers from `GetAdaptersAddresses` | From the system configuration (`State:/Network/Global/DNS`, what `scutil --dns` shows), IPv4 first, with `/etc/resolv.conf` as a fallback. |
+| Rendered page: WebView2, an optional installer component | **WKWebView**, always present, so there is nothing optional to install. Subresource filtering uses a `WKContentRuleList`; navigations, popups, downloads and permission prompts are refused by the delegates. |
+| Rendered page: counts of resources allowed and blocked | **Dropped as a number.** WKWebView enforces a content rule list without reporting per-resource events, so MatrixSys states the rule in force ("only the captured document — every subresource is blocked before it leaves this Mac") instead of showing a count it cannot measure. Cookies in the store are read and shown, because those it can count. |
 | — | **New on macOS:** quit an app gracefully with an Apple event before offering to kill it, `sample` a process for 3 s, flush the DNS cache, reveal in Finder, open Terminal in a folder. |
 
 ### macOS-specific care in the Disks view
@@ -131,12 +196,18 @@ Source layout: `src/shared` (process and descriptor collection, helper protocol,
 ```
 MatrixSys --select <pid>            open with that process selected
 MatrixSys --memory <pid>            open straight into its memory viewer
-MatrixSys --view <0..5>             open on a view
+MatrixSys --view <0..6>             open on a view (6 = trace)
+MatrixSys --size <0|1|2>            size processes by 0 memory, 1 lane traffic, 2 CPU load
+MatrixSys --trace <target> [icmp|tcp|http|https|dns] [step]
+                                    open the trace tab and start a trace
+MatrixSys --trace-dump <target> [proto]
+                                    run one trace with no window and print every step as text
 MatrixSys --demo-packets            synthetic packets shaped like this Mac's real connections,
                                     labelled DEMO everywhere, so the packet viewer can be tried without the helper
 MatrixSys --menubar                 start hidden in the menu bar
 MatrixSys --background              start without taking focus
-MatrixSys --test-socket <path>      accept scripted commands (shot/view/select/key/click/act/state/panel…)
+MatrixSys --test-socket <path>      accept scripted commands (shot/view/select/key/click/act/state/panel/pos/
+                                    trace/trsel/trrender/trstate/trweb/trshot/winid…)
 MatrixSys --helper-socket <path>    talk to a helper on another socket (testing)
 com.matrixsys.helper --socket <p>   run the helper in the foreground; without root it serves only what you can see
 MatrixSys --install-helper [--boot] | --uninstall
@@ -158,3 +229,10 @@ offers to move the app to the Trash.
 * `fs_usage` attribution maps thread ids to pids; for a thread that exits in the same instant, MatrixSys falls
   back to matching the process name, and shows the I/O without a path rather than inventing one.
 * Local Time Machine snapshots are reported as unaccounted space, not attributed to folders, because no folder owns them.
+* The trace's TLS step **continues even when the certificate is not trusted**, so that you can see what the server
+  answers; the verdict and the reason are shown in full, and the only thing MatrixSys ever sends over that connection
+  is a plain `GET`. A browser would stop instead. The handshake and the trust evaluation are Apple's, not ours.
+* The trace speaks IPv4. An IPv6-only target is refused with a clear message rather than silently falling back.
+* The rendered page cannot report how many subresources were blocked (see the table above); it reports the rule instead.
+* A trace sends real packets to the target and is the one thing in MatrixSys that reaches the network on its own —
+  it only ever runs when you ask for it.

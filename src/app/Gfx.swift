@@ -18,6 +18,7 @@ let UI_HEX: [UInt32] = [0xbfefff, 0x4fe3ff, 0x5d8aa8, 0x5ff2ff, 0xff4fd8, 0xffb3
 struct RGBA { var r: Float, g: Float, b: Float, a: Float }
 func rgba(_ h: UInt32, _ a: Float = 1) -> RGBA { let c = hex(h); return RGBA(r: c.r, g: c.g, b: c.b, a: a) }
 func uiCol(_ t: T, _ a: Float = 1) -> RGBA { rgba(UI_HEX[t.rawValue], a) }
+func rgbaOf(_ c: Col, _ a: Float = 1) -> RGBA { RGBA(r: c.r, g: c.g, b: c.b, a: a) }
 
 struct Vtx { var x, y, z, r, g, b, u, v: Float }
 
@@ -56,7 +57,7 @@ final class Atlas {
     init(device: MTLDevice, scale: CGFloat) {
         self.scale = scale
         var cps: [UInt32] = Array(32...126)
-        for s in "▼▲●○…·→←↑↓›≈—–×✓░▒■□◆◇│─┃━⏸▶" { cps.append(s.unicodeScalars.first!.value) }
+        for s in "▼▲●○…·→←↑↓›≈—–×✓░▒■□◆◇│─┃━⏸▶◀" { cps.append(s.unicodeScalars.first!.value) }
         glyphs = cps
         for (i, c) in cps.enumerated() { index[c] = i }
         let reg = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)

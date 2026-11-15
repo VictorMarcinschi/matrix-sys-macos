@@ -22,14 +22,14 @@ final class MatrixView: MTKView, MTKViewDelegate {
         }
     }
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
-    func draw(in view: MTKView) {
+    func draw(in mtk: MTKView) {   // not named `view`: that is the global view index
         guard let gfx = G.gfx else { return }
         let s = Float(window?.backingScaleFactor ?? 2); gfx.rebuildAtlas(scale: s)
         G.LW = Float(bounds.width); G.LH = Float(bounds.height); gfx.LW = G.LW; gfx.LH = G.LH
         let t = nowSec(); let dt = Float(min(0.1, t - lastT)); lastT = t
         frameScene(dt)
         drawUi()
-        if UIS.clickNow && !UIS.mouseOverUi && !cf.open { UIS.panelScroll = 0; selectKey(hov) }
+        if UIS.clickNow && !UIS.mouseOverUi && !cf.open { UIS.panelScroll = 0; if view == 6 && trHovOrb >= 0 { trPick(trHovOrb) } else { selectKey(hov) } }
         UIS.clickNow = false; UIS.wheelUi = 0; navKey = 0
         gfx.draw(view: self, vp: VP, fog: 0.0019)
     }
@@ -78,15 +78,34 @@ final class MatrixView: MTKView, MTKViewDelegate {
     // ---- keyboard
     override func keyDown(with e: NSEvent) { handleKey(code: e.keyCode, chars: e.characters ?? "", mods: e.modifierFlags) }
     func handleKey(code: UInt16, chars: String, mods: NSEvent.ModifierFlags) {
-        if mods.contains(.command) { return }
+        if mods.contains(.command) {
+            if view == 6 && hexMode == 0 && chars.lowercased() == "v", let s = NSPasteboard.general.string(forType: .string) {
+                for u in s.unicodeScalars where u.value >= 33 && u.value < 127 && trInput.count < 240 { trInput.append(Character(u)) }
+                trInputChanged()
+            }
+            return
+        }
         let navMap: [UInt16: Int] = [126: NK.up, 125: NK.down, 123: NK.left, 124: NK.right, 116: NK.pgUp, 121: NK.pgDn, 115: NK.home, 119: NK.end, 36: NK.enter, 76: NK.enter]
         if code == 53 { // Esc: confirmation, then list window, then search text and selection
-            if cf.open { cf.open = false } else if hexMode != 0 { hexClose() } else { query = ""; UIS.panelScroll = 0; selectKey("", fly: false) }
+            if cf.open { cf.open = false } else if hexMode != 0 { hexClose() }
+            else if view == 6 { trSel = -1; if !(TR.live && TR.running) { trPaused = false }; selectKey("", fly: false) }
+            else { query = ""; UIS.panelScroll = 0; selectKey("", fly: false) }
             return
         }
         // while a list window is open, typing and the navigation keys belong to it, not to the filter or the 3D view
         if hexMode != 0 && !cf.open { if let k = navMap[code] { navKey = k }; if chars == "[" || chars == "]" { stepWindow(chars == "]") }; return }
         if cf.open { if code == 36 || code == 76 { } ; return }
+        if view == 6 {   // in the trace tab the keyboard writes the target and drives the replay
+            if code == 123 || code == 124 { trStepKey(code == 123 ? -1 : 1); return }   // ← → step, never pan
+            if code == 126 || code == 125 { navKey = code == 126 ? NK.up : NK.down; return }
+            if code == 36 || code == 76 { trGo(mods.contains(.shift)); return }          // Enter / Shift+Enter
+            if chars == " " { trTogglePause(); return }                                   // Space never reaches the target box
+            if code == 51 { if !trInput.isEmpty { trInput.removeLast(); trInputChanged() }; return }
+            if code == 115 { LY[6].framed = false; camYaw = 0; camPitch = 0.55; rebuild(); return }
+            for u in chars.unicodeScalars where u.value >= 33 && u.value < 127 && trInput.count < 240 { trInput.append(Character(u)) }
+            trInputChanged()
+            return
+        }
         let s: Float = 28
         switch code {
         case 123: panBy(s, 0)
@@ -133,7 +152,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Model.shared.start()
         if let s = argValue("--select"), let pid = Int32(s) { pendingSel = pid }
         if let s = argValue("--memory"), let pid = Int32(s) { DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { hexOpenMem(pid) } }
+        if let s = argValue("--size"), let m = Int(s) { procSizeMode = max(0, min(2, m)) }   // 0 memory, 1 lane traffic, 2 CPU load
         if let s = argValue("--view"), let v = Int(s) { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { setView(v) } }
+        if let t = argValue("--trace") {   // --trace <target> [icmp|tcp|http|https|dns] [step]
+            let names = ["icmp", "tcp", "http", "https", "dns"]
+            var proto = TP.https, step = false
+            if let i = args.firstIndex(of: "--trace") {
+                for a in args.dropFirst(i + 2) {
+                    if let k = names.firstIndex(of: a.lowercased()) { proto = k }
+                    if a.lowercased() == "step" { step = true }
+                }
+            }
+            trInput = t; trProto = proto; trInputChanged()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { setView(6); trGo(step) }
+        }
         if args.contains("--demo-packets") { Packets.shared.demo = true; DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { hexOpenPkts(-1, "") } }
         if let p = argValue("--test-socket") { TestHooks.start(p) }
     }
@@ -268,7 +300,23 @@ enum TestHooks {
             let L = LY[view]
             reply(c, "menubar=\((NSApp.delegate as? AppDelegate)?.status?.button != nil) view=\(view) sel=\(sel) hex=\(hexMode) nodes=\(L.nodes.count) lanes=\(L.lanes.count) parts=\(parts.count) procs=\(S?.procs.count ?? 0) conns=\(S?.conns.count ?? 0) helper=\(Model.shared.helperConnected) capture=\(Model.shared.captureLive) cam=\(camDist) confirm=\(cf.open ? cf.title : "-") toast=\(toastMsg) ext=\(L.ext)")
             return
+        case "trace": trInput = a; trInputChanged(); if view != 6 { setView(6) }; trGo(args.contains("--trace-step"))
+        case "trsel": if let i = Int(a) { trShow(i) }
+        case "trrender": trOpenRender()
+        case "trweb":
+            let w = WebPage.shared
+            let f = w.view?.frame ?? .zero
+            reply(c, "view=\(w.view != nil) visible=\(w.visible) loaded=\(w.loaded) ok=\(w.loadOk) progress=\(w.view?.estimatedProgress ?? -1) title=\(w.view?.title ?? "-") frame=\(Int(f.origin.x)),\(Int(f.origin.y)),\(Int(f.width)),\(Int(f.height)) url=\(w.pageUrl) bytes=\(w.page.utf8.count)")
+            return
+        case "winid": reply(c, "\((NSApp.delegate as? AppDelegate)?.window.windowNumber ?? -1)"); return
+        case "trshot": WebPage.shared.snapshot(a) { ok in reply(c, ok ? "ok " + a : "failed") }; return
+        case "trstate":
+            let selTitle = trSel >= 0 && trSel < TR.msgs.count ? TR.msgs[trSel].title : "-"
+            reply(c, "msgs=\(TR.msgs.count) nodes=\(TR.nodes.count) chain=\(TR.chain.count) running=\(TR.running) status=\(TR.status) err=\(TR.err) sel=\(trSel) paused=\(trPaused) hex=\(hexMode) title=\(selTitle)")
+            return
         case "panel": buildPanel(); reply(c, pitems.map { "\($0.type)|\($0.a)|\($0.b)|\($0.sel)" }.joined(separator: "\n")); return
+        case "pos":   // every node's target position in this view, to measure how much a rebuild moves the scene
+            reply(c, LY[view].nodes.values.map { "\($0.key) \($0.tpos.x) \($0.tpos.y) \($0.tpos.z)" }.sorted().joined(separator: "\n")); return
         default: reply(c, "unknown"); return
         }
         reply(c, "ok")
@@ -278,6 +326,25 @@ enum TestHooks {
 // ================================================================ entry
 if args.contains("--service-console") || args.contains("--install-helper") || args.contains("--uninstall") {
     Helper.cli(args)
+    exit(0)
+}
+// Runs one trace with no window and prints every step as text. The same engine the TRACE tab uses.
+if let target = argValue("--trace-dump") {
+    let names = ["icmp", "tcp", "http", "https", "dns"]
+    let proto = args.count > 3 ? (names.firstIndex(of: args[3].lowercased()) ?? TP.https) : TP.https
+    traceStart(target, proto)
+    var seen = 0
+    let deadline = nowSec() + 90
+    while nowSec() < deadline {
+        let t = TrShared.i.snapshot()
+        while seen < t.msgs.count {
+            let m = t.msgs[seen]; seen += 1
+            print(String(format: "%7.0f ms  %@ %@", m.t * 1000, m.from == m.to ? "*" : m.out ? "->" : "<-", m.title))
+            for f in m.f { print("              \(f.0): \(f.1)") }
+        }
+        if !t.running { print("\n[\(t.status)] \(t.err.isEmpty ? "no error" : t.err) · \(t.nodes.count) nodes · \(t.chain.count) in the chain · \(String(format: "%.1f", t.took)) s"); break }
+        usleep(150000)
+    }
     exit(0)
 }
 let app = NSApplication.shared

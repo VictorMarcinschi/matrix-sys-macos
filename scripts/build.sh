@@ -14,7 +14,7 @@ if [ ! -f "$OUT/MatrixSys.icns" ] || [ "$ROOT/scripts/make_icon.swift" -nt "$OUT
   swiftc -O -module-cache-path "$TMP/mc" -o "$TMP/make_icon" "$ROOT/scripts/make_icon.swift" && "$TMP/make_icon" "$TMP/MatrixSys.iconset" && iconutil -c icns "$TMP/MatrixSys.iconset" -o "$OUT/MatrixSys.icns"
 fi
 echo "== compiling app ($ARCH)"
-swiftc "${FLAGS[@]}" -o "$TMP/MatrixSys" "$ROOT"/src/shared/*.swift "$ROOT"/src/app/*.swift -framework AppKit -framework Metal -framework MetalKit -framework IOKit -framework DiskArbitration -framework SystemConfiguration -lpcap
+swiftc "${FLAGS[@]}" -o "$TMP/MatrixSys" "$ROOT"/src/shared/*.swift "$ROOT"/src/app/*.swift -framework AppKit -framework Metal -framework MetalKit -framework IOKit -framework DiskArbitration -framework SystemConfiguration -framework Network -framework Security -framework WebKit -lpcap
 if ls "$ROOT"/src/helper/*.swift >/dev/null 2>&1; then
   echo "== compiling helper"
   swiftc "${FLAGS[@]}" -import-objc-header "$ROOT/src/helper/bridge.h" -o "$TMP/com.matrixsys.helper" "$ROOT"/src/shared/*.swift "$ROOT"/src/helper/*.swift -lpcap

@@ -62,6 +62,15 @@ func nodeTip(_ n: Node) -> [TL] {
     case .free: return [TL(s: "Free physical memory", c: .cyan), TL(s: "\(fmtB(n.v)) of \(fmtB(Double(S.memTotal)))", c: .text)]
     case .other: return [TL(s: "Kernel, wired, compressed, file cache", c: .cyan), TL(s: "\(fmtB(n.v)) in use outside process resident sets", c: .text),
                          TL(s: "wired \(fmtB(Double(S.memWired))) · compressed \(fmtB(Double(S.memCompressed))) · cache \(fmtB(Double(S.memCache)))", c: .dim)]
+    case .tr:
+        let i = n.cnt
+        guard i >= 0 && i < TR.nodes.count else { return [] }
+        let t = TR.nodes[i]
+        var o = [TL(s: trNodeName(i), c: .cyan)]
+        if !t.ip.isEmpty && t.ip != "system" { o.append(TL(s: t.ip + (isPrivate(t.ip) ? " · private network" : ""), c: .text)) }
+        if t.ms >= 0 { o.append(TL(s: "round trip " + trMs(t.ms), c: .text)) }
+        if !t.note.isEmpty { o.append(TL(s: t.note, c: .dim)) }
+        return o
     }
 }
 func dnsTip(_ ip: String) -> [TL] { let nm = DNS.shared.lookup(ip); return [TL(s: nm.isEmpty ? "host name: resolving…" : nm == "-" ? "host name: none" : nm, c: .dim)] }
@@ -119,7 +128,18 @@ func summaryPanel() {
     guard let S = S else { return }
     let past = pastSnap(); struct R { var a: Double; var b: Double; var p: ProcInfo }; var rows: [R] = []
     if view == 0 {
-        P(0, "Processes"); P(1, "\(S.procs.count) running. Click a process to spread out the cluster it sits in."); P(5, "LIST ALL BY LANE TRAFFIC", "", .dim, "hexlanes"); winButtons("DISK TRAFFIC")
+        P(0, "Processes"); P(1, "\(S.procs.count) running. Click a process to spread out the cluster it sits in.")
+        P(2, "SIZE PROCESSES BY"); P(7, "MEMORY|size:0;LANE TRAFFIC|size:1;CPU LOAD|size:2", "size:\(procSizeMode)")
+        P(5, "LIST ALL BY LANE TRAFFIC", "", .dim, "hexlanes")
+        if procSizeMode == 2 {   // sized by CPU: the list that matches is CPU now, not traffic over a window
+            P(2, "CPU LOAD · NOW")
+            let cs = S.procs.filter { cpuAll($0) >= 0.05 }.sorted { cpuAll($0) > cpuAll($1) }
+            for p in cs.prefix(16) { P(4, "\(p.name) \(p.pid)  \(String(format: "%.1f", cpuAll(p)))%", "", .dim, "p:\(p.pid)") }
+            if cs.isEmpty { P(1, "nothing above 0.05% of the machine") }
+            P(1, "Percent of the whole machine (\(Int(NCPU)) logical cores).")
+            return
+        }
+        winButtons("DISK TRAFFIC")
         for p in S.procs { let w = ioWin(p.pid, past); if w.rd + w.wr > 0 { rows.append(R(a: w.rd, b: w.wr, p: p)) } }
         rows.sort { $0.a + $0.b > $1.a + $1.b }
         for r in rows.prefix(16) { P(4, "\(r.p.name) \(r.p.pid)  ▼\(fmtB(r.a)) ▲\(fmtB(r.b))", "", .dim, "p:\(r.p.pid)") }
@@ -308,7 +328,7 @@ func drawPanel() {
                     let kv = part.split(separator: "|", maxSplits: 1); guard kv.count == 2 else { continue }
                     let lbl = String(kv[0]); let bw = Float(lbl.unicodeScalars.count) * CW + 18
                     if bx + bw > x + w - 8 { continue }   // too many for one row: dropped rather than overflowing
-                    if button(&bx, y + 1, lbl, false, i.cb == .dim ? .cyan : i.cb) && inside { act = String(kv[1]); actView = -1; doAct = true }
+                    if button(&bx, y + 1, lbl, String(kv[1]) == i.b, i.cb == .dim ? .cyan : i.cb) && inside { act = String(kv[1]); actView = -1; doAct = true }
                     bx += 4
                 }
             case 6:
@@ -372,8 +392,8 @@ func drawUi() {
     // top bar
     panelBg(12, 12, G.LW - 24, 36); var x: Float = 24; let y: Float = 19
     g.text(x, y + 1, "MATRIX//SYS", uiCol(.cyan), bold: true); x += 112
-    let tabs = ["PROCESSES", "NETWORK", "FILES", "DISKS", "DEVICES", "MEMORY"], tv = [0, 1, 3, 4, 5, 2]
-    for i in 0..<6 { if button(&x, y, tabs[i], view == tv[i]) && view != tv[i] { setView(tv[i]) } }
+    let tabs = ["PROCESSES", "NETWORK", "FILES", "DISKS", "DEVICES", "MEMORY", "TRACE"], tv = [0, 1, 3, 4, 5, 2, 6]
+    for i in 0..<tabs.count { if button(&x, y, tabs[i], view == tv[i]) && view != tv[i] { setView(tv[i]) } }
     x += 10
     do { let w: Float = 120; g.stroke(x, y, w, 22, rgba(0x4fe3ff, query.isEmpty ? 0.28 : 0.8))
         if query.isEmpty { g.text(x + 8, y + 3, "type to filter", .dim) } else { g.text(x + 8, y + 3, query + "_", .white) }; x += w + 10 }
@@ -391,11 +411,14 @@ func drawUi() {
     do {
         var lg: [TL]
         switch view {
-        case 0: lg = [TL(s: "PROCESS TREE — children rise above their parent; size = memory, glow = CPU. launchd's children are separate trees.", c: .text), TL(s: "Violet lanes = pipes, unix sockets and loopback TCP between processes.", c: .dim)]
+        case 0: lg = [TL(s: "PROCESS TREE — children rise above their parent; size = " + (procSizeMode == 1 ? "lane traffic" : procSizeMode == 2 ? "CPU load" : "memory") + ", glow = CPU. launchd's children are separate trees.", c: .text), TL(s: "Violet lanes = pipes, unix sockets and loopback TCP between processes.", c: .dim)]
         case 1: lg = [TL(s: "NETWORK — inner ring: processes with sockets; stacks: open ports; outer ring: remote hosts.", c: .text), TL(s: "Ports: green = local only, amber = network-reachable, violet = UDP.", c: .dim)]
         case 4: lg = [TL(s: "DISKS — floor area and height = allocated size on each volume, by folder.", c: .text), TL(s: "Select a folder to open it in place; the panel can zoom the whole floor into it. Backspace goes up.", c: .dim)]
         case 5: lg = [TL(s: "DEVICES — the IOKit tree by connection, rising from this Mac; network neighbours hang off their interface.", c: .text), TL(s: "Dots follow the connection path for disks and network interfaces (driver counters).", c: .dim)]
         case 3: lg = [TL(s: "FILES — ring: processes holding files open; outer boxes: files shared by several processes.", c: .text), TL(s: "Select a process to fan out its open files. Without the helper only your own processes are readable.", c: .dim)]
+        case 6: lg = [TL(s: "TRACE — your requests leave as magenta orbs; each answer comes back in the colour of its kind.", c: .text),
+                      TL(s: "Answers: violet DNS · amber router reply · cyan echo · blue TCP · green TLS and HTTP success", c: .dim),
+                      TL(s: "yellow redirect · red error or silence · white greeting. Enter traces at full speed, Shift+Enter step by step. Space pauses, ← → step.", c: .dim)]
         default: lg = [TL(s: "MEMORY — floor area and height = resident memory per application.", c: .text), TL(s: "Select a tower to split it into its processes. Shared pages count in each process.", c: .dim)]
         }
         if view < 2 || view == 3 { lg.append(TL(s: capOn() ? "Network dots are captured packets (250 ms bundles per flow)." : "Dots are paced from exact byte counters (nettop, rusage); packet timing is estimated.", c: .dim)) }
@@ -405,7 +428,7 @@ func drawUi() {
         legendTop = G.LH - h - 12; panelBg(12, G.LH - h - 12, w, h)
         for (i, l) in lg.enumerated() { g.text(24, G.LH - h - 12 + 7 + Float(i) * 16, l.s, l.c) }
     }
-    if hexMode != 0 { drawHex() } else { drawPanel() }
+    if hexMode != 0 { drawHex() } else if view == 6 { drawTraceBar(); drawTracePanel() } else { drawPanel() }
     // tooltip
     if let t = pendingTip { drawTip(t); pendingTip = nil }
     else if !UIS.mouseOverUi {
@@ -421,7 +444,8 @@ func drawUi() {
                      TL(s: "lane rate " + fmtR(o ? l.out : l.inn) + " (exact counter, dot timing estimated)", c: .dim)]
             }
             drawTip(t)
-        } else if !hov.isEmpty, let n = LY[view].nodes[hov] { drawTip(nodeTip(n)) }
+        } else if view == 6 && trHovOrb >= 0 && trHovOrb < TR.msgs.count { drawTip(trOrbTip(TR.msgs[trHovOrb])) }
+        else if !hov.isEmpty, let n = LY[view].nodes[hov] { drawTip(nodeTip(n)) }
     }
     do {
         toastLock.lock(); let tm = toastMsg, tc = toastCol, tt = toastT; toastLock.unlock()
@@ -452,7 +476,7 @@ func drawUi() {
 var pendingTip: [TL]? = nil
 
 // ================================================================ list and hex windows
-var hexMode = 0   // 1 memory, 2 packets, 3 open ports, 4 processes by lane traffic
+var hexMode = 0   // 1 memory, 2 packets, 3 open ports, 4 processes by lane traffic, 5 one trace message, 6 the rendered page
 var navKey = 0, listCur = 0, hexFocus = 1
 var portScroll: Float = 0, laneSort = 0
 enum NK { static let up = 1, down = 2, left = 3, right = 4, pgUp = 5, pgDn = 6, home = 7, end = 8, enter = 9 }
@@ -463,7 +487,7 @@ enum NK { static let up = 1, down = 2, left = 3, right = 4, pgUp = 5, pgDn = 6, 
     if moved { if cur < Int(scroll) { scroll = Float(cur) }; if cur >= Int(scroll) + page { scroll = Float(cur - page + 1) } }
     return k == NK.enter
 }
-func hexClose() { if hexMode == 2 { Packets.shared.close() }; MemViewer.shared.close(); hexMode = 0 }
+func hexClose() { if hexMode == 2 { Packets.shared.close() }; if hexMode == 6 { WebPage.shared.hide(); trWebMsg = -1 }; MemViewer.shared.close(); hexMode = 0 }
 func hexOpenMem(_ pid: Int32) { hexClose(); hexMode = 1; hexFocus = 1; MemViewer.shared.open(pid) }
 func hexOpenPkts(_ pid: Int32, _ ip: String, port: Int = -1, proto: Int = 0) {
     hexClose(); hexMode = 2; hexFocus = 1; Packets.shared.open(pid: pid, ip: ip, port: port, proto: proto)
@@ -496,6 +520,8 @@ func drawHex() {
     let inside = inR(X0, Y0, Wd, Ht); let wheel = inside ? UIS.wheelUi : 0; if inside { UIS.wheelUi = 0 }
     do { var bx = X0 + Wd - 66; if button(&bx, Y0 + 8, "CLOSE", false) { hexClose(); return } }
     let top = Y0 + 42, listH = Ht - 52, hx = X0 + LWd + 14; let rows = max(4, Int(listH / 15)); let inList = inR(X0, top, LWd, listH)
+    if hexMode == 6 { drawTraceRender(X0, Y0, Wd, Ht); return }
+    if hexMode == 5 { drawTraceFull(X0, Y0, Wd, top, rows, wheel); return }
     guard let S = S else { return }
     let click = UIS.clickNow
     if hexMode == 4 {   // every process, ordered by the traffic on its lanes in the time window
@@ -505,12 +531,12 @@ func drawHex() {
         if cap { let t0 = nowSec() - Double(winSec); for f in flowHist.reversed() { if f.t < t0 { break }; var e = net[f.pid] ?? (0, 0); if f.out { e.1 += Double(f.bytes) } else { e.0 += Double(f.bytes) }; net[f.pid] = e } }
         var socks: [Int32: Int] = [:]; for x in SM_loop.values { socks[x.a, default: 0] += x.n; socks[x.b, default: 0] += x.n }
         for p in S.procs { let w = ioWin(p.pid, past); let n = cap ? net[p.pid] ?? (0, 0) : (w.nin, w.nout); rs.append(LR(p: p, rd: w.rd, wr: w.wr, nin: n.0, nout: n.1, socks: socks[p.pid] ?? 0)) }
-        func key(_ a: LR) -> Double { laneSort == 1 ? a.nin + a.nout : laneSort == 2 ? a.rd : laneSort == 3 ? a.wr : a.rd + a.wr + a.nin + a.nout }
+        func key(_ a: LR) -> Double { laneSort == 1 ? a.nin + a.nout : laneSort == 2 ? a.rd : laneSort == 3 ? a.wr : laneSort == 4 ? cpuAll(a.p) : a.rd + a.wr + a.nin + a.nout }
         rs.sort { let x = key($0), y = key($1); return x != y ? x > y : $0.p.pid < $1.p.pid }
         g.text(X0 + 12, Y0 + 9, "PROCESSES BY LANE TRAFFIC · \(rs.count) processes · last \(winSec)s ( [ ] changes it )", uiCol(.cyan), bold: true)
         do { var bx = X0 + 12; g.text(bx, top + 3, "SORT BY", .dim); bx += 62
-            for (m, nm) in ["ALL LANES", "NETWORK", "DISK READS", "DISK WRITES"].enumerated() { if button(&bx, top, nm, laneSort == m) { laneSort = m; portScroll = 0 }; bx += 4 } }
-        g.text(X0 + 12, top + 26, "PROCESS                           PID   ALL LANES  in / out       NETWORK  in / out       DISK  read / write     LOCAL LANES", .dim)
+            for (m, nm) in ["ALL LANES", "NETWORK", "DISK READS", "DISK WRITES", "CPU LOAD"].enumerated() { if button(&bx, top, nm, laneSort == m) { laneSort = m; portScroll = 0 }; bx += 4 } }
+        g.text(X0 + 12, top + 26, "PROCESS                           PID      CPU%   ALL LANES  in / out       NETWORK  in / out       DISK  read / write     LOCAL LANES", .dim)
         if inside { portScroll = max(0, min(portScroll - wheel * 3, max(0, Float(rs.count - (rows - 3))))) }
         let enter = navList(&listCur, &portScroll, rs.count, rows - 3)
         let first = Int(portScroll)
@@ -518,10 +544,10 @@ func drawHex() {
             let r = rs[first + i]; let y = top + 41 + Float(i) * 15; let hot = inR(X0 + 6, y, Wd - 12, 15), cur = first + i == listCur
             if hot || cur { g.fill(X0 + 6, y, Wd - 12, 15, rgba(0x4fe3ff, cur ? 0.22 : 0.12)) }
             let nm = ellipsize(r.p.name, 28)
-            let line = nm.padding(toLength: 28, withPad: " ", startingAt: 0) + String(format: " %8d   %9@ %9@     %9@ %9@     %9@ %9@     %@", r.p.pid,
+            let line = nm.padding(toLength: 28, withPad: " ", startingAt: 0) + String(format: " %8d   %7.1f   %9@ %9@     %9@ %9@     %9@ %9@     %@", r.p.pid, cpuAll(r.p),
                 fmtB(r.rd + r.nin) as NSString, fmtB(r.wr + r.nout) as NSString, fmtB(r.nin) as NSString, fmtB(r.nout) as NSString,
                 (r.p.hasIO ? fmtB(r.rd) : "-") as NSString, (r.p.hasIO ? fmtB(r.wr) : "-") as NSString, (r.socks > 0 ? "\(r.socks)" : "") as NSString)
-            g.text(X0 + 12, y, line, hot || cur ? .white : r.rd + r.wr + r.nin + r.nout > 0 ? .text : .dim)
+            g.text(X0 + 12, y, line, hot || cur ? .white : r.rd + r.wr + r.nin + r.nout > 0 || cpuAll(r.p) >= 0.05 ? .text : .dim)
             if (hot && click) || (cur && enter) { let k = "p:\(r.p.pid)"; hexClose(); UIS.clickNow = false; if view != 0 { setView(0, k) } else { selectKey(k) }; return }
         }
         return
