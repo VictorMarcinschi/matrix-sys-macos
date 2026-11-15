@@ -347,12 +347,53 @@ if let target = argValue("--trace-dump") {
     }
     exit(0)
 }
+/// RFC 3414 A.3: the published key-derivation test vectors. Password-to-key and localization are the parts of USM
+/// most easily got subtly wrong — a mistake there looks exactly like a wrong password — so they are checked against
+/// the RFC's own numbers rather than against another implementation of mine. Run: MatrixSys --snmp-selftest
+if args.contains("--snmp-selftest") {
+    func hex(_ b: [UInt8]) -> String { b.map { String(format: "%02x", $0) }.joined() }
+    // RFC 3414 A.3.1 / A.3.2: password "maplesyrup", engine id 00:00:00:00:00:00:00:00:00:00:00:02
+    let engine: [UInt8] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]
+    let cases: [(String, AuthProto, String, String)] = [
+        ("MD5",   .md5,  "9faf3283884e92834ebc9847d8edd963",
+                         "526f5eed9fcce26f8964c2930787d82b"),
+        ("SHA-1", .sha1, "9fb5cc0381497b37935289 39ff788d5d79145211".replacingOccurrences(of: " ", with: ""),
+                         "6695febc9288e36282235fc7151f128497b38f3f"),
+    ]
+    var bad = 0
+    for (name, proto, wantKu, wantKul) in cases {
+        let ku = snmpPasswordToKey("maplesyrup", proto)
+        let kul = snmpLocalizeKey(ku, engineID: engine, proto)
+        let okKu = hex(ku) == wantKu, okKul = hex(kul) == wantKul
+        if !okKu { bad += 1 }
+        if !okKul { bad += 1 }
+        print("\(name) Ku   \(hex(ku))  \(okKu ? "ok" : "WRONG, want " + wantKu)")
+        print("\(name) Kul  \(hex(kul))  \(okKul ? "ok" : "WRONG, want " + wantKul)")
+    }
+    print(bad == 0 ? "\nRFC 3414 A.3 key derivation: all vectors match" : "\n\(bad) MISMATCHES")
+    exit(bad == 0 ? 0 : 1)
+}
+
 /// Reads one SNMP agent and prints what it says. No window, read-only, the same code the LAN view uses.
 if let ip = argValue("--snmp-dump") {
     let community = args.count > 3 && !args[3].hasPrefix("--") ? args[3] : snmpCommunity()
-    let port = UInt16(argValue("--port") ?? "") ?? 161
-    print("asking \(ip):\(port) over SNMP v2c, community \"\(community)\"\n")
-    let s = snmpQuery(ip, community: community, port: port) { _, m in FileHandle.standardError.write(Data(("  … " + m + "\n").utf8)) }
+    let port = UInt16(argValue("--port") ?? "") ?? snmpPort()
+    // --v3 <user> [--auth MD5|SHA|SHA256] [--authpass x] [--priv AES] [--privpass y]; passwords given here are for
+    // testing only, and the panel never offers this route: in the app they come from the keychain.
+    var v3: SnmpV3User? = nil
+    if let u = argValue("--v3") {
+        var x = SnmpV3User()
+        x.name = u
+        x.authProto = AuthProto.named(argValue("--auth") ?? "")
+        x.privProto = PrivProto.named(argValue("--priv") ?? "")
+        x.authPassword = argValue("--authpass") ?? keychainPassword(service: "com.matrixsys.snmp.auth", account: u)
+        x.privPassword = argValue("--privpass") ?? keychainPassword(service: "com.matrixsys.snmp.priv", account: u)
+        v3 = x
+    } else { v3 = snmpV3Configured() }
+    print("asking \(ip):\(port) over SNMP\n")
+    let s = snmpQuery(ip, community: community, port: port, v3: v3) { _, m in FileHandle.standardError.write(Data(("  … " + m + "\n").utf8)) }
+    print("reached    \(s.how)")
+    if !s.engineID.isEmpty { print("engine     \(s.engineID)") }
     if !s.ok { print(s.note); exit(1) }
     if !s.name.isEmpty { print("name      \(s.name)") }
     if !s.descr.isEmpty { print("descr     \(s.descr)") }

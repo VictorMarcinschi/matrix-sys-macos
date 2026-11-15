@@ -179,18 +179,113 @@ func snmpRequest(_ ip: String, community: String, oids: [[Int]], next: Bool, tim
 }
 
 /// Walks a subtree with GETNEXT. Stops at the first OID outside the root, at `max` rows, or after `seconds`.
-func snmpWalk(_ ip: String, community: String, root: [Int], max rows: Int = 256, seconds: Double = 8, port: UInt16 = 161) -> [SnmpVar] {
+func snmpWalk(_ t: SnmpTarget, root: [Int], max rows: Int = 256, seconds: Double = 8) -> [SnmpVar] {
     var out: [SnmpVar] = []
     var cur = root
     let deadline = nowSec() + seconds
     while out.count < rows && nowSec() < deadline {
-        guard let vs = snmpRequest(ip, community: community, oids: [cur], next: true, port: port), let v = vs.first else { break }
+        guard let vs = t.request([cur], next: true), let v = vs.first else { break }
         if v.isEnd || v.oid.count < root.count || Array(v.oid.prefix(root.count)) != root { break }
         if v.oid == cur { break }                       // an agent that does not advance would loop forever
         out.append(v)
         cur = v.oid
     }
     return out
+}
+
+
+// ================================================================ how to talk to an agent
+
+/// v3 passwords live in your login keychain, never in MatrixSys. The app only ever reads them, and macOS asks you
+/// to allow that the first time. Add them yourself:
+///
+///     security add-generic-password -s com.matrixsys.snmp.auth -a <user> -w
+///     security add-generic-password -s com.matrixsys.snmp.priv -a <user> -w
+///
+/// Because the app is signed ad hoc, its identity changes when you rebuild, so macOS asks again after an update —
+/// the same caveat that applies to Full Disk Access.
+func keychainPassword(service: String, account: String) -> String {
+    guard !account.isEmpty else { return "" }
+    let q: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: account,
+        kSecReturnData as String: true,
+        kSecMatchLimit as String: kSecMatchLimitOne,
+    ]
+    var out: CFTypeRef? = nil
+    guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+          let d = out as? Data, let s = String(data: d, encoding: .utf8) else { return "" }
+    return s
+}
+
+/// The v3 user, if one is configured. Nothing secret is kept in preferences — only the name and which algorithms
+/// to use; the passwords come from the keychain.
+///
+///     defaults write com.matrixsys.app snmpV3User <name>
+///     defaults write com.matrixsys.app snmpV3Auth MD5|SHA|SHA256
+///     defaults write com.matrixsys.app snmpV3Priv AES
+func snmpV3Configured() -> SnmpV3User? {
+    let d = UserDefaults.standard
+    let name = d.string(forKey: "snmpV3User") ?? ""
+    guard !name.isEmpty else { return nil }
+    var u = SnmpV3User()
+    u.name = name
+    u.authProto = AuthProto.named(d.string(forKey: "snmpV3Auth") ?? "")
+    u.privProto = PrivProto.named(d.string(forKey: "snmpV3Priv") ?? "")
+    if u.authProto != .none { u.authPassword = keychainPassword(service: "com.matrixsys.snmp.auth", account: name) }
+    if u.privProto != .none { u.privPassword = keychainPassword(service: "com.matrixsys.snmp.priv", account: name) }
+    return u
+}
+
+/// One agent, at one security level, for the length of one query: v3 when a user is configured, v2c otherwise.
+/// v3 keys cost a million-byte hash each, so they are derived once here and reused for every request that follows.
+final class SnmpTarget {
+    let ip: String, port: UInt16
+    let community: String
+    var v3Session: SnmpV3Session? = nil
+    var reason = ""
+    var describe: String {
+        if let s = v3Session {
+            return "v3 " + s.user.level + (s.user.authProto == .none ? "" : " · " + s.user.authProto.name)
+                 + (s.user.privProto == .none ? "" : " · " + s.user.privProto.name) + " · user " + s.user.name
+        }
+        return "v2c · community \"" + community + "\""
+    }
+
+    init(ip: String, port: UInt16, community: String, v3: SnmpV3User?) {
+        self.ip = ip; self.port = port; self.community = community
+        guard let u = v3 else { return }
+        if !u.usable {
+            reason = u.authPassword.isEmpty && u.authProto != .none
+                ? "No authentication password in the keychain for user \"" + u.name + "\"."
+                : u.privPassword.isEmpty && u.privProto != .none
+                ? "No privacy password in the keychain for user \"" + u.name + "\"."
+                : "The v3 user in your preferences is incomplete."
+            return
+        }
+        let s = snmpV3Open(ip, port: port, user: u)
+        if !s.error.isEmpty { reason = s.error }
+        v3Session = s
+    }
+
+    func request(_ oids: [[Int]], next: Bool, timeoutMs: Int = 1500) -> [SnmpVar]? {
+        if v3Session != nil {
+            var why = ""
+            let r = snmpV3Request(ip, port: port, session: &v3Session!, oids: oids, next: next, timeoutMs: timeoutMs, reason: &why)
+            if r == nil && !why.isEmpty {
+                // a reboot moves the time window; the report carried the new numbers, so one retry is fair
+                if why.contains("time window") {
+                    var again = ""
+                    let r2 = snmpV3Request(ip, port: port, session: &v3Session!, oids: oids, next: next, timeoutMs: timeoutMs, reason: &again)
+                    if r2 != nil { return r2 }
+                    reason = again.isEmpty ? why : again
+                } else { reason = why }
+            }
+            return r
+        }
+        return snmpRequest(ip, community: community, oids: oids, next: next, timeoutMs: timeoutMs, port: port)
+    }
 }
 
 // ================================================================ the objects worth showing
@@ -224,6 +319,8 @@ struct SnmpInfo {
     var asked = false, ok = false
     var at = 0.0
     var community = ""
+    var how = ""              // "v2c · community …" or "v3 authPriv · SHA-256 · AES-128 · user …"
+    var engineID = ""
     var descr = "", name = "", contact = "", location = "", uptime = "", objectID = ""
     var ifs: [SnmpIf] = []
     var arp: [(ip: String, mac: String)] = []
@@ -243,15 +340,32 @@ func snmpPort() -> UInt16 {
     return v > 0 && v < 65536 ? UInt16(v) : 161
 }
 
-func snmpQuery(_ ip: String, community: String, port: UInt16 = 161, _ note: @escaping (Double, String) -> Void) -> SnmpInfo {
+func snmpQuery(_ ip: String, community: String, port: UInt16 = 161, v3: SnmpV3User? = nil,
+               _ note: @escaping (Double, String) -> Void) -> SnmpInfo {
     var s = SnmpInfo()
     s.asked = true; s.at = nowSec(); s.community = community
 
+    note(0.05, v3 == nil ? "asking \(ip) over SNMP v2c" : "discovering \(ip)'s SNMP engine")
+    let t = SnmpTarget(ip: ip, port: port, community: community, v3: v3)
+    s.how = t.describe
+    if let e = t.v3Session?.engine, !e.id.isEmpty { s.engineID = e.idText }
+    if !t.reason.isEmpty && t.v3Session?.engine.id.isEmpty != false {
+        s.note = t.reason
+        return s
+    }
+
     note(0.1, "asking \(ip) for its description")
-    guard let scalars = snmpRequest(ip, community: community,
-                                    oids: [OID.sysDescr, OID.sysObjectID, OID.sysUpTime, OID.sysContact, OID.sysName, OID.sysLocation],
-                                    next: false, timeoutMs: 1500, port: port), !scalars.isEmpty else {
-        s.note = "No answer on UDP 161. Either SNMP is off, or it is on with a community other than \"\(community)\"."
+    guard let scalars = t.request([OID.sysDescr, OID.sysObjectID, OID.sysUpTime, OID.sysContact, OID.sysName, OID.sysLocation],
+                                  next: false), !scalars.isEmpty else {
+        // A wrong privacy password is indistinguishable from silence: the agent cannot decrypt the request, so it
+        // answers nothing at all. net-snmp's own client times out the same way, so say what it most likely means.
+        s.note = t.reason.isEmpty
+            ? (v3 == nil
+                ? "No answer on UDP \(port). Either SNMP is off, or it is on with a community other than \"\(community)\"."
+                : v3?.privProto != PrivProto.none
+                    ? "The engine answered discovery, then went silent. With authPriv that is what a wrong privacy password looks like: the agent cannot decrypt the request, so it does not reply at all."
+                    : "The engine answered discovery but not the request itself.")
+            : t.reason
         return s
     }
     for v in scalars {
@@ -274,7 +388,7 @@ func snmpQuery(_ ip: String, community: String, port: UInt16 = 161, _ note: @esc
     note(0.4, "reading the interface table")
     var byIndex: [Int: SnmpIf] = [:]
     func walkInto(_ root: [Int], _ apply: (inout SnmpIf, SnmpVar) -> Void) {
-        for v in snmpWalk(ip, community: community, root: root, max: 64, seconds: 6, port: port) {
+        for v in snmpWalk(t, root: root, max: 64, seconds: 6) {
             guard let idx = v.oid.last else { continue }
             var e = byIndex[idx] ?? { var n = SnmpIf(); n.index = idx; return n }()
             apply(&e, v)
@@ -291,7 +405,7 @@ func snmpQuery(_ ip: String, community: String, port: UInt16 = 161, _ note: @esc
 
     note(0.75, "reading its ARP table")
     // the address is the tail of the OID: ipNetToMediaPhysAddress.<ifIndex>.<a>.<b>.<c>.<d>
-    for v in snmpWalk(ip, community: community, root: OID.ipNetToMediaPhys, max: 512, seconds: 10, port: port) {
+    for v in snmpWalk(t, root: OID.ipNetToMediaPhys, max: 512, seconds: 10) {
         let tail = v.oid.suffix(4)
         guard tail.count == 4, tail.allSatisfy({ $0 >= 0 && $0 < 256 }) else { continue }
         let addr = tail.map(String.init).joined(separator: ".")

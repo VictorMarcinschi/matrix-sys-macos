@@ -395,10 +395,10 @@ final class Lan {
     func querySnmp(_ ip: String) {
         guard !isBusy() else { return }
         lock.lock(); working = true; cancelFlag = false; lock.unlock()
-        let community = snmpCommunity(), port = snmpPort()
+        let community = snmpCommunity(), port = snmpPort(), v3 = snmpV3Configured()
         Thread {
             defer { self.lock.lock(); self.working = false; self.busy = ""; self.lock.unlock() }
-            let info = snmpQuery(ip, community: community, port: port) { p, s in self.setBusy(s, p) }
+            let info = snmpQuery(ip, community: community, port: port, v3: v3) { p, s in self.setBusy(s, p) }
             self.edit(ip) { h in h.snmp = info }
             guard info.ok else { toast("No SNMP answer from \(ip) with community \"\(community)\"", .warn); return }
             var added = 0

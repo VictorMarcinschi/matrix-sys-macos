@@ -72,7 +72,10 @@ func buildLan() {
         q.s1 = h.ip
         q.op = lanFresh(h, t)
         q.glow = h.replied ? 0.75 : 0.4
-        q.lp = h.gw ? 6 : h.named ? 2.4 : 1
+        // a meaningful order, not three big ties: the gateway, then named machines, then whatever has open ports,
+        // then the rest — with the address breaking remaining ties so the same label always wins
+        q.lp = (h.gw ? 6 : h.named ? 2.4 : 1) + min(0.7, Float(open.count) * 0.1)
+             + Float(ipToU32(h.ip) & 0xff) / 1000
         let anchor = ifPos[h.ifn] != nil ? "lanif:" + h.ifn : "lanme"
         let l = mkLane("lhl:" + h.ip, anchor, "lh:" + h.ip, h.gw ? C_WARN : C_DEEP, w: h.gw ? 0.8 : 0.45, tree: true)
         l.proto = h.gw ? "default route" : "same network"
@@ -89,6 +92,7 @@ func buildLan() {
             pq.label = "\(pt.port) " + svcName(pt.port)
             pq.port = pt.port; pq.s1 = h.ip; pq.owner = "lh:" + h.ip
             pq.glow = 0.7; pq.op = q.op
+            pq.lp = 0.9 - Float(i) * 0.02          // the lowest port's label wins when a stack crowds
             let pl = mkLane("lpl:\(h.ip):\(pt.port)", "lh:" + h.ip, "lp:\(h.ip):\(pt.port)", C_SAFE, w: 0.35, tree: true)
             pl.proto = "TCP \(pt.port) open"; pl.from = h.label; pl.to = "\(pt.port) " + svcName(pt.port); pl.tree = true
             lanes.append(pl)
@@ -166,8 +170,14 @@ private func lanSnmpSection(_ h: LanHost) {
     if !s.asked {
         if openNow { P(1, "UDP 161 answered a scan, so this one is worth asking.") }
         P(1, "Read-only: the system description, the interface table and the agent's own ARP table. MatrixSys never")
-        P(1, "writes an SNMP object. Community \"" + snmpCommunity() + "\"" +
-             (snmpCommunity() == "public" ? " (the default; change it with: defaults write com.matrixsys.app snmpCommunity <name>)" : " (from your preferences)"))
+        P(1, "writes an SNMP object.")
+        if let u = snmpV3Configured() {
+            P(1, "v3 as \"" + u.name + "\" (" + u.level + (u.authProto == .none ? "" : ", " + u.authProto.name)
+                 + (u.privProto == .none ? "" : " + " + u.privProto.name) + "), passwords from your keychain.")
+        } else {
+            P(1, "v2c, community \"" + snmpCommunity() + "\"" + (snmpCommunity() == "public" ? " (the default)" : " (from your preferences)") + ".")
+            P(1, "For v3: defaults write com.matrixsys.app snmpV3User <name>, then add its passwords to the keychain.")
+        }
     }
     P(5, s.asked && s.ok ? "ASK IT AGAIN (SNMP)" : "ASK IT OVER SNMP", "", .cyan, "act:lansnmp:" + h.ip)
     guard s.asked else { return }
@@ -175,6 +185,8 @@ private func lanSnmpSection(_ h: LanHost) {
         for line in wrapText(s.note, 46) { P(1, line) }
         return
     }
+    if !s.how.isEmpty { P(3, "reached over", s.how, .dim) }
+    if !s.engineID.isEmpty { P(3, "engine id", s.engineID, .dim) }
     if !s.name.isEmpty { P(3, "system name", s.name, .safe) }
     if !s.descr.isEmpty {
         P(3, "description", "", .text)

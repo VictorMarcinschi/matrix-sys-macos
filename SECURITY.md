@@ -44,9 +44,12 @@ every pf rule MatrixSys added.
   * *ASK ITS NAME* / *ASK EVERY NAME*: one mDNS reverse query and one NetBIOS node-status query per machine.
   * *SCAN*: one TCP connection per port (87 in the common list). An open port is sent nothing except, on a web
     port, a plain `GET /` with no credentials and no cookies.
-  * *ASK IT OVER SNMP*: SNMP v2c reads — one GET, then GETNEXT walks of the interface and ARP tables. **MatrixSys
-    never issues an SNMP SET**, so it cannot change another machine's configuration. The community string defaults
-    to the documented `public` and is otherwise read from this app's own preferences, never stored by MatrixSys.
+  * *ASK IT OVER SNMP*: SNMP reads — one GET, then GETNEXT walks of the interface and ARP tables. **MatrixSys
+    never issues an SNMP SET**, so it cannot change another machine's configuration. v2c uses a community string,
+    defaulting to the documented `public` and otherwise read from this app's own preferences. v3 is used instead
+    as soon as a user is configured: its **passwords are read from your login keychain and never stored by
+    MatrixSys**, which has no way to write them, and they are never sent on the wire — the message carries an
+    HMAC keyed by the password and the agent's engine id, and with authPriv the payload is AES-128 encrypted.
   * *ASK IT OVER UPNP*: SSDP discovery and read-only SOAP calls to the gateway.
   * *WAKE IT*: one Wake-on-LAN broadcast.
 

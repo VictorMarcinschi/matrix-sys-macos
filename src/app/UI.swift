@@ -354,7 +354,11 @@ func drawLabels() {
         if k == sel { pr += 200 }; if k == hov { pr += 300 }
         c.append((pr, n))
     }
-    c.sort { $0.0 > $1.0 }
+    // Ties must break the same way every frame. `c` is gathered from a dictionary, whose order varies, and sort is
+    // not stable, so sorting on priority alone let two overlapping labels of equal priority swap places between
+    // frames — and the greedy overlap rejection below then dropped a different one each time, which reads as
+    // flicker. The node key is the stable tiebreak.
+    c.sort { $0.0 != $1.0 ? $0.0 > $1.0 : $0.1.key < $1.1.key }
     var taken: [(Float, Float, Float)] = []; var used = 0
     for (_, n) in c {
         if used >= 80 { break }

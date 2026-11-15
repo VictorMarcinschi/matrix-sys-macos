@@ -34,7 +34,12 @@ rebuild while MatrixSys is running.
   that list, in `SECURITY.md`, and behind a button.
 * **Read, do not reconfigure, other people's machines.** MatrixSys reads SNMP and UPnP; it issues no SNMP `SET`
   and no UPnP action that changes a setting. It also stores no credential for anything on the network: the admin
-  page, SSH and telnet buttons hand the session to a browser or to Terminal.
+  page, SSH and telnet buttons hand the session to a browser or to Terminal, and SNMP v3 passwords are read from
+  the login keychain, which the app never writes.
+* **Check cryptography against the specification's own numbers, not against yourself.** The USM key derivation has
+  the RFC 3414 A.3 vectors behind `--snmp-selftest`; a second implementation of your own misunderstanding proves
+  nothing. Where a reference implementation exists, test against it too — v3 was verified against net-snmp,
+  including that it *rejects* a wrong password.
 * Comments explain *why*, not *what*. Keep them where the reasoning is not obvious from the code.
 * Keep layouts stable: a process appearing or leaving must not re-pack the scene.
 

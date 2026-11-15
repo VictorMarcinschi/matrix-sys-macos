@@ -147,8 +147,33 @@ defaults write com.matrixsys.app snmpCommunity <name>
 defaults write com.matrixsys.app snmpPort <n>        # if your agents are not on 161
 ```
 
-SNMP v1 and v2c send the community in the clear, which is why MatrixSys only ever reads with it. v3 (authentication
-and encryption) is not implemented.
+SNMP v1 and v2c send the community in the clear, which is why MatrixSys only ever reads with it.
+
+**v3** is implemented too, and is used instead of v2c as soon as a user is configured. It authenticates every
+message with a key derived from your password *and* the agent's engine id, and can encrypt the payload:
+
+| | |
+|---|---|
+| Authentication | HMAC-MD5-96, HMAC-SHA-96 (RFC 3414) and HMAC-192-SHA-256 (RFC 7860) |
+| Privacy | AES-128-CFB (RFC 3826). DES is not implemented: 56-bit keys, and every agent that offers it offers AES |
+| Levels | noAuthNoPriv, authNoPriv, authPriv |
+
+Nothing secret goes in preferences. The user name and the algorithms do; **the passwords come from your login
+keychain**, which MatrixSys only ever reads — macOS asks you to allow that the first time, and again after a
+rebuild, because an ad-hoc signature changes identity:
+
+```
+defaults write com.matrixsys.app snmpV3User <name>
+defaults write com.matrixsys.app snmpV3Auth MD5|SHA|SHA256
+defaults write com.matrixsys.app snmpV3Priv AES        # omit for authNoPriv
+
+security add-generic-password -s com.matrixsys.snmp.auth -a <name> -w
+security add-generic-password -s com.matrixsys.snmp.priv -a <name> -w
+```
+
+When an agent refuses, it says why, because USM reports the reason: an unknown user, a wrong digest (the
+authentication password), or a message outside its time window. A wrong *privacy* password is the one case with no
+report — the agent cannot decrypt the request, so it answers nothing at all, and the panel says so.
 
 ### Administering the router
 
@@ -268,7 +293,8 @@ into `MatrixSys.icns`; no hand-maintained Xcode project is involved.
 Source layout: `src/shared` (process and descriptor collection, helper protocol, packet parsing), `src/app`
 (scene, UI, views, actions, capture and memory viewers, helper client), `src/helper` (the privileged daemon),
 `resources` (install and uninstall scripts). The LAN view is `src/app/Lan.swift` (discovery, scanning, UPnP) and
-`src/app/LanView.swift` (its scene and panel), with `src/app/Snmp.swift` for BER and SNMP v2c.
+`src/app/LanView.swift` (its scene and panel), with `src/app/Snmp.swift` for BER and SNMP v2c and
+`src/app/SnmpV3.swift` for USM.
 
 ### Command-line test hooks
 
@@ -287,6 +313,9 @@ MatrixSys --scan-dump <ip> [common|admin|low|full]
                                     port-scan one host with no window and print what answered
 MatrixSys --snmp-dump <ip> [community] [--port n]
                                     read one SNMP agent and print its system info, interfaces and ARP table
+          --v3 <user> [--auth MD5|SHA|SHA256] [--authpass p] [--priv AES] [--privpass p]
+                                    ... over SNMP v3 instead; without --authpass the keychain is used
+MatrixSys --snmp-selftest           check the USM key derivation against the RFC 3414 A.3 vectors
 MatrixSys --demo-packets            synthetic packets shaped like this Mac's real connections,
                                     labelled DEMO everywhere, so the packet viewer can be tried without the helper
 MatrixSys --menubar                 start hidden in the menu bar
@@ -332,8 +361,10 @@ offers to move the app to the Trash.
   claim the same name, and a machine can claim any name at all.
 * The MAC vendor table is a snapshot of the IEEE registry from the day you ran `make_oui.sh`, and the panel says so.
   A randomised MAC is labelled as one rather than being looked up.
-* **SNMP is read-only and v2c only.** v3 is not implemented, so an agent that requires it is simply not answered.
+* **SNMP is read-only**, v2c and v3. No `SET` is ever sent, at any version.
   A community string travels in the clear in v1 and v2c; that is the protocol, not this app.
+* v3 privacy is AES-128 only, and SHA-384/512 authentication is not implemented. An agent that requires either is
+  not answered. The key derivation is checked against the RFC 3414 A.3 test vectors by `--snmp-selftest`.
 * An agent's ARP table is what *it* believes. An entry can be stale, and a device that has been quiet for a long
   time may be missing from it entirely.
 * The UPnP answers come from the router and are not verified. A router with UPnP off, or one that implements only
