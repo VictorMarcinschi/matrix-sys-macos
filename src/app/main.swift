@@ -347,6 +347,81 @@ if let target = argValue("--trace-dump") {
     }
     exit(0)
 }
+/// Reads one SNMP agent and prints what it says. No window, read-only, the same code the LAN view uses.
+if let ip = argValue("--snmp-dump") {
+    let community = args.count > 3 && !args[3].hasPrefix("--") ? args[3] : snmpCommunity()
+    let port = UInt16(argValue("--port") ?? "") ?? 161
+    print("asking \(ip):\(port) over SNMP v2c, community \"\(community)\"\n")
+    let s = snmpQuery(ip, community: community, port: port) { _, m in FileHandle.standardError.write(Data(("  … " + m + "\n").utf8)) }
+    if !s.ok { print(s.note); exit(1) }
+    if !s.name.isEmpty { print("name      \(s.name)") }
+    if !s.descr.isEmpty { print("descr     \(s.descr)") }
+    if !s.uptime.isEmpty { print("uptime    \(s.uptime)") }
+    if !s.location.isEmpty { print("location  \(s.location)") }
+    if !s.contact.isEmpty { print("contact   \(s.contact)") }
+    if !s.ifs.isEmpty {
+        print("\ninterfaces (\(s.ifs.count))")
+        for i in s.ifs { print(String(format: "  %-4d %-22@ %-5@ in %@ out %@", i.index, i.name as NSString,
+                                      (i.up ? "up" : "down") as NSString, fmtB(Double(i.inOctets)) as NSString, fmtB(Double(i.outOctets)) as NSString)) }
+    }
+    if !s.arp.isEmpty {
+        print("\nits ARP table (\(s.arp.count))")
+        for (a, m) in s.arp { print("  \(a.padding(toLength: 16, withPad: " ", startingAt: 0)) \(m)  \(macIsRandom(m) ? "private MAC" : ouiVendor(m))") }
+    }
+    if !s.note.isEmpty { print("\n" + s.note) }
+    exit(0)
+}
+
+/// Finds the machines on the local networks and prints them as text. No window, the same code the LAN view uses.
+if args.contains("--lan-dump") || argValue("--scan-dump") != nil {
+    if let ip = argValue("--scan-dump") {
+        let set = ["admin", "low", "full", "common"].first { args.contains($0) } ?? "common"
+        let ports = lanPortSet(set)
+        print("scanning \(ip): \(ports.count) TCP ports\n")
+        var open: [LanPort] = []
+        let (parallel, timeout) = lanScanPace(ports.count)
+        raiseFdLimit(parallel * 2 + 256)
+        for batch in stride(from: 0, to: ports.count, by: parallel) {
+            for var r in tcpConnectBatch(ip, Array(ports[batch..<min(batch + parallel, ports.count)]), timeoutMs: timeout) where r.state == LAN_OPEN {
+                (r.banner, r.server) = lanBanner(ip, r.port)
+                open.append(r)
+                print(String(format: "  %-6d %-12s open   %@", r.port, (svcName(r.port) as NSString).utf8String!, r.server.isEmpty ? r.banner.prefix(60).description : r.server))
+            }
+        }
+        print("\n\(open.count) open of \(ports.count) tried")
+        exit(0)
+    }
+    for i in lanInterfaces() {
+        print("\(i.name)  \(i.ip)/\(i.cidr)  network \(i.cidrText)  \(i.hosts) addresses  mac \(macOf(i.name))")
+    }
+    if args.contains("--sweep") {
+        for i in lanInterfaces() where i.hosts > 0 && i.hosts <= LAN_SWEEP_MAX {
+            print("\nsweeping \(i.cidrText) …")
+            guard let s = IcmpSock() else { break }
+            var replies = Set<String>()
+            for k in 1...i.hosts {
+                let a = i.net + UInt32(k)
+                if a == i.bcast { continue }
+                _ = s.sendEcho(ipFromU32(a), seq: UInt16(k & 0xffff))
+                if k % 16 == 0 { while let rx = s.recvOne(1) { replies.insert(rx.from) } }
+                usleep(1500)
+            }
+            let deadline = nowSec() + 2
+            while nowSec() < deadline { if let rx = s.recvOne(150) { replies.insert(rx.from) } }
+            s.close()
+            print("\(replies.count) answered the ping")
+        }
+    }
+    let gws = Set(Devices.shared.gateways().map { $0.0 })
+    print("")
+    for (ip, mac, ifn) in Devices.shared.neighbours().sorted(by: { ipToU32($0.0) < ipToU32($1.0) }) where !ip.contains(":") {
+        let md = args.contains("--names") ? mdnsReverse(ip) : ""
+        let nb = args.contains("--names") && md.isEmpty ? nbnsName(ip) : ""
+        let vendor = macIsRandom(mac) ? "private MAC" : ouiVendor(mac)
+        print("\(ip.padding(toLength: 16, withPad: " ", startingAt: 0)) \(mac)  \(ifn)\(gws.contains(ip) ? "  gateway" : "")  \(md.isEmpty ? nb : md)  \(vendor)")
+    }
+    exit(0)
+}
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

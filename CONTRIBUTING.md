@@ -16,18 +16,25 @@ rebuild while MatrixSys is running.
 | Path | What lives there |
 |---|---|
 | `src/shared` | Code the app and the helper both use: process and descriptor collection, the helper line protocol, packet parsing. |
-| `src/app` | `Gfx` (Metal renderer and glyph atlas), `Model` (collector), `Scene` (layouts, particles, camera), `UI` (overlay), `Actions`, `Disks`, `Devices`, `Capture`, `Trace` (the trace engine), `TraceUI`, `WebPage`, `main`. |
+| `src/app` | `Gfx` (Metal renderer and glyph atlas), `Model` (collector), `Scene` (layouts, particles, camera), `UI` (overlay), `Actions`, `Disks`, `Devices`, `Capture`, `Trace` (the trace engine), `TraceUI`, `WebPage`, `Lan` (LAN discovery, scanning, UPnP), `LanView` (its scene and panel), `Snmp` (BER and SNMP v2c), `main`. |
 | `src/helper` | The privileged LaunchDaemon: capture, fs_usage, pf, memory reads, TCP reset. |
 | `resources` | Install and uninstall scripts shipped inside the bundle. |
-| `scripts` | `build.sh`, `make_icon.swift`, `run-test.sh`. |
+| `scripts` | `build.sh`, `make_icon.swift`, `run-test.sh`, `make_oui.sh` (optional, builds the MAC vendor table). |
 
 ## House rules
 
 * **Real data only.** Every number on screen comes from the system. If something cannot be measured, say so on
   screen — `-`, "not readable", or the rule in force — rather than showing a plausible zero.
 * **No third-party dependencies**, no web view for the UI, no bundled runtime. The macOS SDK is the whole toolbox.
-* **Offline.** The only things that reach the network are reverse DNS through the system resolver, the whois lookup
-  when its button is pressed, and the Trace tab when you ask it to trace.
+* **Offline by default, and never on a timer.** Nothing reaches the network unless you asked for it: reverse DNS
+  through the system resolver, the whois lookup when its button is pressed, the Trace tab when you start a trace,
+  and the LAN view's sweep, name queries, port scan, SNMP read and UPnP query — each behind its own button, each
+  stating what it will send first. The LAN view's default sources cost no packets at all: the ARP table the kernel
+  already keeps and the mDNS/SSDP announcements already on the wire. A new feature that sends anything belongs in
+  that list, in `SECURITY.md`, and behind a button.
+* **Read, do not reconfigure, other people's machines.** MatrixSys reads SNMP and UPnP; it issues no SNMP `SET`
+  and no UPnP action that changes a setting. It also stores no credential for anything on the network: the admin
+  page, SSH and telnet buttons hand the session to a browser or to Terminal.
 * Comments explain *why*, not *what*. Keep them where the reasoning is not obvious from the code.
 * Keep layouts stable: a process appearing or leaving must not re-pack the scene.
 

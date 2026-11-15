@@ -1,11 +1,12 @@
 # MatrixSys for macOS
 
 A native, fully offline 3D visualizer of everything running on this Mac — processes, the data they exchange,
-network traffic, memory, open files, disks and devices — with controls to act on what it shows.
+network traffic, memory, open files, disks and devices — plus the machines on your own network, with controls to
+act on what it shows.
 
-Swift + AppKit + Metal, no third-party dependencies, no web view, no bundled runtime. The only network traffic
-MatrixSys itself makes is reverse DNS through the system resolver, and the owner (whois) lookup, which happens
-only when you press its button.
+Swift + AppKit + Metal, no third-party dependencies, no web view, no bundled runtime. Nothing is sent anywhere by
+itself: reverse DNS through the system resolver, and then only what you press a button for — the owner (whois)
+lookup, a trace, and the LAN view's sweep, port scan and router query.
 
 ---
 
@@ -61,10 +62,11 @@ connection is checked: only root, the console user and members of the `admin` gr
 | Administrator password | installing or removing the helper | the app runs unprivileged |
 | **Full Disk Access** (System Settings → Privacy & Security) | scanning Mail, Messages, Safari and other protected folders in the Disks view | those folders are counted as "not readable"; everything else still scans. The Disks panel has a button that opens the right pane |
 | **Automation → Finder** | only the EMPTY TRASH action | that one action fails; nothing else is affected |
+| **Local Network** (macOS 15 and later) | the LAN view: finding machines on your own network, and the sweep, scan and router query | the LAN view finds nothing beyond the ARP table macOS already keeps |
 
-MatrixSys asks for no other permission, and sends nothing anywhere.
+MatrixSys asks for no other permission.
 
-## The seven views
+## The eight views
 
 * **Processes** — the process tree as a 3D cone tree, children above their parent, size = memory, glow = CPU.
   Lanes show data exchange: network, disk, and the pipes, unix sockets and loopback TCP between processes.
@@ -74,6 +76,8 @@ MatrixSys asks for no other permission, and sends nothing anywhere.
 * **Files** — which process has which files open; files held by several processes are highlighted.
 * **Disks** — every volume and its folders as a treemap. APFS containers show their shared free space once.
 * **Devices** — the IOKit hardware tree, plus network neighbours (ARP/NDP) and gateways hanging off their interface.
+* **LAN** — every machine on the networks this Mac is on: address, MAC, hardware vendor, the names it answers to,
+  and the TCP ports it has open. This Mac at the centre, each network next to it, the machines on a ring. See below.
 * **Trace** — type a host, an IP or a URL and watch every step between this Mac and it: the name lookup, each router
   on the way, and the conversation in the chosen protocol. See below.
 
@@ -88,6 +92,76 @@ Layouts are **stable**: a process appearing or leaving does not re-pack the scen
 floor, each child keeps its angle on its parent's ring, and a ring only shrinks when it is clearly too wide. Measured
 on this Mac over a minute of normal churn: before, a single rebuild moved a node up to 232 units in Processes and 37
 in Network; after, 0 and 4.6.
+
+## The LAN tab
+
+Who else is on your network, what they are called, and what they are listening on. This Mac is the icosahedron in
+the middle, each network it is attached to hangs off it, and every machine found sits on the ring with its open
+ports stacked above it. Amber is the default gateway, green a machine that has a name, violet one with open ports
+found by a scan, blue one found but unnamed. A machine not seen for a while fades rather than disappearing.
+
+**By default it sends nothing.** Two sources cost no packets at all:
+
+* the **ARP and NDP tables** macOS already keeps — every machine this Mac has spoken to recently, with its MAC;
+* the **mDNS and SSDP announcements** already being broadcast on the wire. MatrixSys joins the two multicast groups
+  and listens. This is where names like `Cristinas-iMac` and `DESKTOP-ANVPCDP` come from without asking anyone.
+
+Everything else is a button, and each says what it is about to send:
+
+| Button | What it sends | What you get |
+|---|---|---|
+| **SWEEP** | one ICMP echo to every address in the subnet | every machine that is up. A host that *ignores* the ping is still found: it had to answer the ARP request before the ping could be sent, so its MAC is now in the ARP table. Presence at layer 2 is the evidence, not the reply. Refused above 1024 addresses (/22) rather than flooding a larger network |
+| **ASK EVERY NAME** | one mDNS reverse query and one NetBIOS node-status query per machine | the name each machine calls itself |
+| **SCAN COMMON PORTS** | one TCP connection per port, 91 picked ones | open, **closed** (the host sent a reset) and **filtered** (silence) — the three states the kernel can actually tell apart. An open port is then asked what it is: the greeting of a server that speaks first, or the `Server` header and page title from a plain `GET` on a web port |
+| **SCAN 1-1023** / **SCAN EVERY PORT** | the same, over every well-known port or all 65535 | the only way to find a listener on a port nobody would guess, which is where consumer IoT usually is. A full range takes a little over two minutes on a LAN; the panel counts it down and **STOP** ends it, keeping what was found so far |
+| **ASK IT OVER SNMP** | one SNMP v2c GET, then GETNEXT walks | see below |
+| **ASK IT OVER UPNP** | SSDP discovery and a few SOAP calls to the gateway | see below |
+| **WAKE IT** | one Wake-on-LAN magic packet | a machine that supports it powers on |
+
+A MAC with the locally administered bit set is labelled **private address**, not given a vendor: iOS and Android
+use a different random MAC per network by default, so it names no hardware and will change. Real vendors come from
+the IEEE registry, which is **not bundled** — run `scripts/make_oui.sh` once to build `resources/oui.txt` (about
+1 MB, 40 000 assignments) and rebuild. Without it the panel shows the raw OUI and claims no vendor.
+
+### SNMP
+
+Offered for every machine, not just the router: printers, NAS boxes and managed switches answer it as readily.
+**Read-only.** `SET` is part of the same protocol and deliberately not implemented — nothing in MatrixSys changes
+another machine's configuration.
+
+| What | From |
+|---|---|
+| system name, description, uptime, location, contact | the MIB-2 `system` group |
+| every interface, its state, link rate, MAC and byte counters | `ifTable` |
+| **the machines that agent has seen** | `ipNetToMediaTable`, its own ARP table |
+
+That last row is the one nothing else can give. Your Mac's ARP table holds only what *it* has spoken to; a router's
+holds everything *it* has. Entries found there and not already known are added to the view and marked
+"known to the router, not seen by this Mac".
+
+The community string is `public` — the documented default for read-only access, not a secret. A different one goes
+in the app's own preferences rather than being typed into MatrixSys:
+
+```
+defaults write com.matrixsys.app snmpCommunity <name>
+defaults write com.matrixsys.app snmpPort <n>        # if your agents are not on 161
+```
+
+SNMP v1 and v2c send the community in the clear, which is why MatrixSys only ever reads with it. v3 (authentication
+and encryption) is not implemented.
+
+### Administering the router
+
+There is no cross-vendor standard for *changing* a router's settings from a LAN client, so MatrixSys does not try,
+and it stores no credentials. Two standards can be *read*, and both are read-only here: SNMP, above, and:
+
+* **UPnP IGD**, the one thing most routers answer without a login: what the router calls itself, its
+  model, the address your connection has on the internet, how long it has been connected, the line rate, and the
+  **port-mapping table** — every hole something on your network has opened through the router. A router with UPnP
+  off simply does not answer, and the panel says so rather than guessing.
+* **OPEN ADMIN PAGE**, **SSH** and **TELNET** hand the session to something that does log in: your browser, or a
+  Terminal window. The scan has already established which of those ports is actually open. MatrixSys never sees the
+  password. (macOS ships no `telnet`; that button runs `nc` instead and says so.)
 
 ## The Trace tab
 
@@ -183,25 +257,36 @@ scripts/build.sh          # builds build/MatrixSys.app (icon, app, helper, ad-ho
 scripts/build.sh --dmg    # the same plus build/MatrixSys.dmg
 ```
 
+`scripts/make_oui.sh` is separate and optional: it downloads the IEEE MAC-prefix registry and writes
+`resources/oui.txt`, which the LAN view uses to name hardware vendors. It is the only script that touches the
+network, it is never run by `build.sh`, and the file is not committed — without it the app claims no vendor.
+
 The build output goes to `build/`, outside the source tree, and the app bundle is swapped in atomically, so
 rebuilding works while MatrixSys is running. `scripts/make_icon.swift` draws the icon and `iconutil` turns it
 into `MatrixSys.icns`; no hand-maintained Xcode project is involved.
 
 Source layout: `src/shared` (process and descriptor collection, helper protocol, packet parsing), `src/app`
 (scene, UI, views, actions, capture and memory viewers, helper client), `src/helper` (the privileged daemon),
-`resources` (install and uninstall scripts).
+`resources` (install and uninstall scripts). The LAN view is `src/app/Lan.swift` (discovery, scanning, UPnP) and
+`src/app/LanView.swift` (its scene and panel), with `src/app/Snmp.swift` for BER and SNMP v2c.
 
 ### Command-line test hooks
 
 ```
 MatrixSys --select <pid>            open with that process selected
 MatrixSys --memory <pid>            open straight into its memory viewer
-MatrixSys --view <0..6>             open on a view (6 = trace)
+MatrixSys --view <0..7>             open on a view (6 = trace, 7 = LAN)
 MatrixSys --size <0|1|2>            size processes by 0 memory, 1 lane traffic, 2 CPU load
 MatrixSys --trace <target> [icmp|tcp|http|https|dns] [step]
                                     open the trace tab and start a trace
 MatrixSys --trace-dump <target> [proto]
                                     run one trace with no window and print every step as text
+MatrixSys --lan-dump [--sweep] [--names]
+                                    print the local networks and every machine found, as text
+MatrixSys --scan-dump <ip> [common|admin|low|full]
+                                    port-scan one host with no window and print what answered
+MatrixSys --snmp-dump <ip> [community] [--port n]
+                                    read one SNMP agent and print its system info, interfaces and ARP table
 MatrixSys --demo-packets            synthetic packets shaped like this Mac's real connections,
                                     labelled DEMO everywhere, so the packet viewer can be tried without the helper
 MatrixSys --menubar                 start hidden in the menu bar
@@ -234,5 +319,22 @@ offers to move the app to the Trash.
   is a plain `GET`. A browser would stop instead. The handshake and the trust evaluation are Apple's, not ours.
 * The trace speaks IPv4. An IPv6-only target is refused with a clear message rather than silently falling back.
 * The rendered page cannot report how many subresources were blocked (see the table above); it reports the rule instead.
-* A trace sends real packets to the target and is the one thing in MatrixSys that reaches the network on its own —
-  it only ever runs when you ask for it.
+* A trace sends real packets to the target, and only when you ask for it.
+* The LAN view speaks IPv4. IPv6 neighbours are in the Devices view.
+* A **port scan is a TCP connect scan**: the connection is completed and then closed, so it is visible in the
+  target's own logs. A half-open SYN scan would need the helper and is not offered, because on a network you
+  administer it buys nothing.
+* "Filtered" means no answer before the timeout — 900 ms for a short list, 600 ms for a full range, against a LAN
+  round trip of a few milliseconds. A host that rate-limits its resets can still report filtered for a closed port.
+* A host with **nothing open** is a real and common answer, not a failure: a cloud-connected device reaches its
+  maker's server by its own outbound connection, and nothing on your network can connect to it at all.
+* Names are what each machine says about itself over mDNS, NetBIOS or SSDP. Nothing checks them: two machines can
+  claim the same name, and a machine can claim any name at all.
+* The MAC vendor table is a snapshot of the IEEE registry from the day you ran `make_oui.sh`, and the panel says so.
+  A randomised MAC is labelled as one rather than being looked up.
+* **SNMP is read-only and v2c only.** v3 is not implemented, so an agent that requires it is simply not answered.
+  A community string travels in the clear in v1 and v2c; that is the protocol, not this app.
+* An agent's ARP table is what *it* believes. An entry can be stale, and a device that has been quiet for a long
+  time may be missing from it entirely.
+* The UPnP answers come from the router and are not verified. A router with UPnP off, or one that implements only
+  part of IGD, gives less or nothing, and the panel reports exactly what came back.

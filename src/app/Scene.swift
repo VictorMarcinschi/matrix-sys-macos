@@ -18,12 +18,15 @@ func nameColor(_ name: String) -> Col { let h = fnv(name.lowercased()); return h
 let SVC: [Int: String] = [20: "FTP", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS", 67: "DHCP", 68: "DHCP", 80: "HTTP", 88: "Kerberos", 110: "POP3", 123: "NTP",
     137: "NetBIOS", 138: "NetBIOS", 139: "NetBIOS", 143: "IMAP", 443: "HTTPS", 445: "SMB", 500: "IKE", 548: "AFP", 546: "DHCPv6", 587: "SMTP", 631: "IPP", 853: "DoT", 993: "IMAPS",
     995: "POP3S", 1900: "SSDP", 3283: "ARD", 3306: "MySQL", 3689: "DAAP", 4500: "IPsec", 5000: "AirPlay", 5223: "APNs", 5228: "Push", 5353: "mDNS", 5355: "LLMNR",
-    5432: "Postgres", 5900: "VNC", 6379: "Redis", 7000: "AirPlay", 8080: "HTTP-alt", 8443: "HTTPS-alt", 27017: "MongoDB", 62078: "lockdown"]
+    5432: "Postgres", 5900: "VNC", 6379: "Redis", 7000: "AirPlay", 8080: "HTTP-alt", 8443: "HTTPS-alt", 27017: "MongoDB", 62078: "lockdown",
+    111: "RPC", 161: "SNMP", 389: "LDAP", 427: "SLP", 515: "LPD", 554: "RTSP", 873: "rsync", 1433: "MSSQL", 2049: "NFS", 3000: "HTTP-alt",
+    5357: "WSD", 7547: "TR-069", 8000: "HTTP-alt", 8291: "Winbox", 8728: "MikroTik API", 9100: "JetDirect", 10000: "Webmin", 32400: "Plex",
+    5683: "CoAP", 6667: "IRC", 6668: "Tuya", 8883: "MQTT/TLS", 8554: "RTSP-alt"]
 func svcName(_ p: Int) -> String { SVC[p] ?? "" }
 func protoName(_ p: Int) -> String { p == 6 ? "TCP" : p == 17 ? "UDP" : p == 1 ? "ICMP" : p == 58 ? "ICMPv6" : "IP" }
 
 enum Shape: Int { case octa = 0, ico, box, tetra }
-enum Kind { case proc, hubnet, hubio, pc, port, host, group, free, other, file, disk, dir, dev, nb, vol, tr }
+enum Kind { case proc, hubnet, hubio, pc, port, host, group, free, other, file, disk, dir, dev, nb, vol, tr, lhost, lport }
 struct Geo { var v: [V3] = []; var e: [(Int, Int)] = []; var t: [(Int, Int, Int)] = [] }
 var GEO: [Geo] = []
 func buildGeo() {
@@ -74,7 +77,7 @@ final class Layer {
 }
 
 // ================================================================ app state
-var LY: [Layer] = (0..<7).map { _ in Layer() }   // 0 processes, 1 network, 2 memory, 3 files, 4 disks, 5 devices, 6 trace
+var LY: [Layer] = (0..<8).map { _ in Layer() }   // 0 processes, 1 network, 2 memory, 3 files, 4 disks, 5 devices, 6 trace, 7 LAN
 // Layout memory, so that one process appearing or leaving does not re-pack the whole scene.
 var procKAng: [Int: (Int, Float)] = [:]                                   // child pid -> (parent pid, its angle on that parent's ring)
 var procFloor: [Int: (x: Float, z: Float, r: Float, ord: Int)] = [:]      // root pid -> where its tree stands on the floor
@@ -719,14 +722,14 @@ func rebuild() {
         capPps = Int(n / dts); capAcc = [:]; capAccT = t
     }
     buildSM(); capDirty = false
-    switch view { case 0: buildProc(); case 1: buildNet(); case 3: buildFiles(); case 4: buildDisks(); case 5: buildDevs(); case 6: buildTrace(); default: buildRam() }
+    switch view { case 0: buildProc(); case 1: buildNet(); case 3: buildFiles(); case 4: buildDisks(); case 5: buildDevs(); case 6: buildTrace(); case 7: buildLan(); default: buildRam() }
     computeFocus()
     let L = LY[view]
     if !L.framed && L.ext > 0 {
         L.framed = true
         if sel.isEmpty {
             flyT = V3(0, view == 2 || view == 4 ? -20 : 10, 0)
-            flyDist = min(1500, L.ext * (view == 2 || view == 4 ? 1.9 : view == 1 || view == 3 ? 1.8 : 1.15))
+            flyDist = min(1500, L.ext * (view == 2 || view == 4 ? 1.9 : view == 1 || view == 3 || view == 7 ? 1.8 : 1.15))
             if view == 6 {   // the chain is framed in the part of the window the panel leaves free
                 let pf = min(Float(0.6), (min(500, G.LW * 0.46) + 24) / G.LW), kx = tan(FOV / 2) * G.LW / G.LH
                 flyDist = max(120, L.ext / ((1 - pf) * 0.86 * kx))
@@ -758,7 +761,8 @@ func selectKey(_ key: String, fly: Bool = true) {
     computeFocus()
     if fly, let n = LY[view].nodes[key] { flyT = n.tpos; flyDist = view == 2 || view == 4 ? 90 : 48; flying = true }
 }
-func setView(_ v: Int, _ key: String = "") {
+func setView(_ vIn: Int, _ key: String = "") {
+    let v = max(0, min(LY.count - 1, vIn))
     // remember the camera of the view we leave
     let o = LY[view]; o.camT = camT; o.camYaw = camYaw; o.camPitch = camPitch; o.camDist = camDist; o.hasCam = true
     view = v; parts = []; hov = ""; hovPart = -1; sel = ""
@@ -814,6 +818,9 @@ func frameScene(_ dt: Float) {
     Disks.shared.wanted = view == 4
     Devices.shared.wanted = view == 5
     if let d = Devices.shared.latest(), d !== DV, !paused { DV = d; devHist.append(d); if devHist.count > 70 { devHist.removeFirst() }; if view == 5 && S != nil { rebuild() } }
+    // the LAN collector keeps running once it has started: the passive listener is only useful if it keeps listening
+    Lan.shared.wanted = Lan.shared.wanted || view == 7
+    if let l = Lan.shared.latest(), l !== LN, !paused { LN = l; if view == 7 && S != nil { rebuild() } }
     if Disks.shared.changed() && view == 4 && S != nil { rebuild() }
     if !paused {
         if let s = model.latest(), s !== S {
@@ -854,6 +861,7 @@ func frameScene(_ dt: Float) {
                 let lk = view == 0 ? "net:\(f.pid)" : view == 5 ? "" : "c:\(f.pid):\(f.rip)"
                 if view < 2, let l = L.lanes[lk] { spawnPart(L, l, f.out ? 1 : -1, Double(f.bytes), f) }
                 else if view == 5 { devSpawnFlow(f) }
+                else if view == 7 { lanSpawnFlow(f) }
                 else if view < 2 && now - f.t < 1.5 { keep.append(f) }
             }
             pending = keep

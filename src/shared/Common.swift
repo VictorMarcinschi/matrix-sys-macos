@@ -24,6 +24,13 @@ func fmtB(_ v: Double) -> String {
     return String(format: b < 10 ? "%.1f %@" : "%.0f %@", b, u[i])
 }
 func fmtR(_ b: Double) -> String { fmtB(b) + "/s" }
+/// Link rates only (SNMP ifSpeed, UPnP line rate), which are quoted in bits per second, not bytes.
+func fmtBits(_ bitsPerSec: Double) -> String {
+    let u = ["b", "Kb", "Mb", "Gb", "Tb"]
+    var v = bitsPerSec, i = 0
+    while v >= 1000 && i < u.count - 1 { v /= 1000; i += 1 }
+    return String(format: v < 10 && i > 0 ? "%.1f %@/s" : "%.0f %@/s", v, u[i])
+}
 func sgnB(_ d: Double) -> String { (d >= 0 ? "+" : "-") + fmtB(abs(d)) }
 
 func cString<T>(_ tuple: T) -> String {

@@ -6,3 +6,4 @@ windows-reference/
 
 # macOS
 .DS_Store
+resources/oui.txt

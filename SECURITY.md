@@ -37,6 +37,21 @@ every pf rule MatrixSys added.
   the exchange in the protocol you chose, all to the target you typed.
 * **Subresources of a captured page**, only if you turn *LOAD RESOURCES* on in the rendered page view. It is off by
   default, and with it off nothing but the captured bytes is shown.
+* **The LAN view**, and only to machines on your own networks. By default it sends nothing at all: it reads the ARP
+  and NDP tables macOS already keeps, and listens to the mDNS and SSDP announcements already being broadcast. Each
+  of the following is a separate button that states what it will send before it sends it:
+  * *SWEEP*: one ICMP echo per address in the subnet, refused above 1024 addresses.
+  * *ASK ITS NAME* / *ASK EVERY NAME*: one mDNS reverse query and one NetBIOS node-status query per machine.
+  * *SCAN*: one TCP connection per port (87 in the common list). An open port is sent nothing except, on a web
+    port, a plain `GET /` with no credentials and no cookies.
+  * *ASK IT OVER SNMP*: SNMP v2c reads — one GET, then GETNEXT walks of the interface and ARP tables. **MatrixSys
+    never issues an SNMP SET**, so it cannot change another machine's configuration. The community string defaults
+    to the documented `public` and is otherwise read from this app's own preferences, never stored by MatrixSys.
+  * *ASK IT OVER UPNP*: SSDP discovery and read-only SOAP calls to the gateway.
+  * *WAKE IT*: one Wake-on-LAN broadcast.
+
+  MatrixSys never logs in to anything and stores no credentials. *OPEN ADMIN PAGE*, *SSH* and *TELNET* hand the
+  session to your browser or to Terminal, which is where any password you type goes.
 
 There is **no telemetry, no analytics, no update check, and no crash reporting**. MatrixSys never sends your data
 anywhere, and it has no server side.
@@ -46,5 +61,9 @@ anywhere, and it has no server side.
 * The trace's TLS step **continues when a certificate is not trusted**, and shows the verdict and the reason. This is
   so you can see what a misconfigured or hostile server actually answers. The only thing sent over that connection is
   a plain `GET` with no credentials and no cookies.
+* A **port scan is a TCP connect scan**: the connection is completed, so it appears in the target's logs. This is
+  deliberate — MatrixSys does not offer a half-open scan, and nothing it does is designed to be hard to notice.
+  Scanning machines you do not administer is often against the rules of the network you are on; the confirmation
+  says so before each sweep and each scan.
 * The app is **signed ad hoc**. It is not notarized, and Gatekeeper will refuse the first launch until you allow it.
   Verify the SHA256 of a downloaded build against `SHA256SUMS` in the release, or build it yourself from source.

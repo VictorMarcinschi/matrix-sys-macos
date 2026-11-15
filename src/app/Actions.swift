@@ -78,6 +78,60 @@ func requestAction(_ key: String) {
         NSWorkspace.shared.open([url], withApplicationAt: URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app"), configuration: NSWorkspace.OpenConfiguration()) { _, e in if let e = e { toast("Terminal: " + e.localizedDescription, .red) } }
     case "whois": if validIp(rest) { Whois.shared.lookup(rest) }
     case "ping": ping(rest)
+    // ---- LAN view. Nothing here stores a credential; the two that send many packets ask first.
+    case "lanname": Lan.shared.askName(rest)
+    case "lannames": Lan.shared.askAllNames()
+    case "lanwake": Lan.shared.wake(rest)
+    case "lanrouter": Lan.shared.queryRouter(rest)
+    case "lansnmp": Lan.shared.querySnmp(rest)
+    case "lancancel": Lan.shared.cancel(); toast("Stopping", .warn)
+    case "lanadmin":
+        let open = Set(lanHost(rest)?.openPorts.map { $0.port } ?? [])
+        var url = "http://" + rest
+        if open.contains(443) { url = "https://" + rest }
+        else if open.contains(8443) { url = "https://\(rest):8443" }
+        else if open.contains(80) { url = "http://" + rest }
+        else if open.contains(8080) { url = "http://\(rest):8080" }
+        else if open.contains(81) { url = "http://\(rest):81" }
+        if let u = URL(string: url) { NSWorkspace.shared.open(u); toast("Opened " + url + " in your browser", .safe) }
+    case "lanopen":
+        let f = rest.split(separator: ":")
+        if f.count == 2, let p = Int(f[1]) {
+            let scheme = (p == 443 || p == 8443) ? "https" : "http"
+            let url = scheme + "://" + f[0] + ((p == 80 || p == 443) ? "" : ":\(p)")
+            if let u = URL(string: url) { NSWorkspace.shared.open(u); toast("Opened " + url + " in your browser", .safe) }
+        }
+    case "lanssh":
+        openInTerminal("ssh \(rest)", "ssh-" + rest)
+    case "lantelnet":
+        let hasTelnet = FileManager.default.isExecutableFile(atPath: "/usr/bin/telnet")
+        openInTerminal(hasTelnet ? "telnet \(rest) 23" : "nc \(rest) 23", "telnet-" + rest)
+        if !hasTelnet { toast("macOS has no telnet; opened nc instead", .warn) }
+    case "lantrace":
+        trInput = rest; trInputChanged(); setView(6); trGo(false)
+    case "lantraceport":
+        let f = rest.split(separator: ":")
+        if f.count == 2 { trInput = "tcp://" + f[0] + ":" + f[1]; trInputChanged(); setView(6); trGo(false) }
+    // ---- LAN view, with a confirmation: these are the only things in MatrixSys that address machines you did not type
+    case "lansweep", "lansweepnames":
+        guard let i = lanInterfaces().first(where: { $0.name == rest }) else { toast("No such network: " + rest, .warn); return }
+        if i.hosts <= 0 || i.hosts > LAN_SWEEP_MAX {
+            toast("Refusing to sweep \(i.cidrText): \(i.hosts) addresses, limit \(LAN_SWEEP_MAX)", .warn); return
+        }
+        cf.title = verb == "lansweepnames" ? "Sweep \(i.cidrText) and ask every name?" : "Sweep \(i.cidrText)?"
+        cf.detail = "Sends one ICMP echo to each of the \(i.hosts) addresses on \(rest), then reads the ARP table again. Hosts that ignore the ping are still found."
+            + (verb == "lansweepnames" ? " Then one mDNS and one NetBIOS query to each machine found." : "")
+        cf.warn = "This is visible to every machine on the network and to anything watching it. Some workplaces forbid it."
+        cf.yes = "SWEEP"; cf.red = false; cf.open = true
+    case "lanscan", "lanscanadmin", "lanscanlow", "lanscanfull":
+        let set = verb == "lanscanadmin" ? "admin" : verb == "lanscanlow" ? "low" : verb == "lanscanfull" ? "full" : "common"
+        let n = lanPortSet(set).count
+        cf.title = "Scan \(n) TCP ports on \(rest)?"
+        cf.detail = "Opens one connection per port. An open port is asked what it is — the greeting it sends by itself, or a plain GET on a web port. Nothing is sent to a closed port."
+            + (n > 4096 ? " Every port from 1 to 65535 takes a few minutes; the panel counts down and STOP ends it." : "")
+        cf.warn = "A port scan is visible to the target and to anything watching the network."
+            + (n > 4096 ? " A full-range scan is the loudest thing MatrixSys does." : "")
+        cf.yes = "SCAN"; cf.red = false; cf.open = true
     case "front":
         if let a = NSRunningApplication(processIdentifier: pid) { a.unhide(); if !a.activate(options: [.activateAllWindows]) { toast("\(procLabel(pid)) did not come to the front", .warn) } } else { toast(procLabel(pid) + " has no windows", .warn) }
     case "quit":
@@ -233,12 +287,32 @@ func performAction(_ key: String) {
         async { let r = Model.shared.helperRequest("IFACE\t\(rest)\t\(verb == "ifdown" ? "down" : "up")")
             toast(r?.first == "OK" ? "\(rest) is \(verb == "ifdown" ? "down" : "up")" : "ifconfig failed: " + (r?.first ?? "no answer"), r?.first == "OK" ? .safe : .red) }
     case "flushdns": requestAction(key)
+    case "lansweep": Lan.shared.sweep(rest)
+    case "lansweepnames": Lan.shared.askAllNames(rest)
+    case "lanscan": Lan.shared.scan(rest, LAN_PORTS_COMMON)
+    case "lanscanadmin": Lan.shared.scan(rest, LAN_PORTS_ADMIN)
+    case "lanscanlow": Lan.shared.scan(rest, LAN_PORTS_LOW)
+    case "lanscanfull": Lan.shared.scan(rest, LAN_PORTS_ALL)
     case "helperinstall": Helper.install(boot: rest == "1")
     default: _ = arg
     }
 }
 
 // ------------------------------------------------------------ helpers for actions
+/// Hands a command to Terminal by writing a .command file and opening it. No Apple events, so no Automation
+/// permission, and no credential ever passes through MatrixSys: whatever the command asks for, you type there.
+func openInTerminal(_ cmd: String, _ name: String) {
+    let dir = NSTemporaryDirectory() + "matrixsys"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let safe = name.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "." ? $0 : "-" }.map(String.init).joined()
+    let path = dir + "/" + safe + ".command"
+    let body = "#!/bin/sh\n# written by MatrixSys; it only runs what is on the next line\nexec " + cmd + "\n"
+    guard (try? body.write(toFile: path, atomically: true, encoding: .utf8)) != nil else { toast("Could not write the command file", .red); return }
+    chmod(path, 0o700)
+    NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    toast("Opened Terminal: " + cmd, .safe)
+}
+
 func ping(_ ip: String) {
     async {
         let v6 = ip.contains(":")

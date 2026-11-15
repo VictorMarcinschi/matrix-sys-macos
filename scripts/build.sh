@@ -40,6 +40,7 @@ cat > "$STAGE/Contents/Info.plist" <<PL
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>MatrixSys asks Finder to empty the Trash when you choose EMPTY TRASH.</string>
+<key>NSLocalNetworkUsageDescription</key><string>The LAN view finds the machines on your own network: it reads the announcements already on the wire, and sends a ping sweep or a port scan only when you press that button.</string>
 <key>NSHumanReadableCopyright</key><string>MatrixSys — native offline system visualizer</string>
 </dict></plist>
 PL

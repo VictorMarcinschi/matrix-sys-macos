@@ -37,6 +37,7 @@ func procTip(_ p: ProcInfo) -> [TL] {
 }
 func nodeTip(_ n: Node) -> [TL] {
     guard let S = S else { return [] }
+    if view == 7 { let t = lanTip(n); if !t.isEmpty { return t } }
     let p = n.pid >= 0 ? S.get(n.pid) : nil
     switch n.kind {
     case .proc:
@@ -56,6 +57,7 @@ func nodeTip(_ n: Node) -> [TL] {
     case .host: return [TL(s: n.s1 + (isPrivate(n.s1) ? " · LAN" : " · internet"), c: .cyan), TL(s: "\(n.cnt) connection(s) from \(n.more) process(es)", c: .text)] + dnsTip(n.s1)
     case .dir, .vol: return diskTip(n)
     case .dev, .nb: return devTip(n)
+    case .lhost, .lport: return lanTip(n)
     case .file: return [TL(s: (n.s1 as NSString).lastPathComponent, c: .cyan), TL(s: n.s1, c: .text), TL(s: "open in \(n.cnt) process(es)", c: .dim)]
     case .disk: return [TL(s: "Disk", c: .cyan), TL(s: "\(n.cnt) open files visible", c: .text)]
     case .group: return [TL(s: n.name, c: .cyan), TL(s: "\(fmtB(n.v)) resident · \(n.cnt) process(es)", c: .text), TL(s: String(format: "%.1f%% of RAM", n.v / Double(S.memTotal) * 100), c: .text)]
@@ -246,7 +248,7 @@ func userName(_ uid: UInt32) -> String { if let pw = getpwuid(uid) { return Stri
 
 func buildPanel() {
     pitems = []; guard let S = S else { return }
-    if view == 4 { diskPanel(); return }; if view == 5 { devPanel(); return }
+    if view == 4 { diskPanel(); return }; if view == 5 { devPanel(); return }; if view == 7 { lanPanel(); return }
     if sel.isEmpty { summaryPanel(); return }
     let L = LY[view]; let ni = L.nodes[sel]
     let isProc = sel.hasPrefix("p:") || sel.hasPrefix("n:") || sel.hasPrefix("rp:") || sel.hasPrefix("f:")
@@ -392,7 +394,7 @@ func drawUi() {
     // top bar
     panelBg(12, 12, G.LW - 24, 36); var x: Float = 24; let y: Float = 19
     g.text(x, y + 1, "MATRIX//SYS", uiCol(.cyan), bold: true); x += 112
-    let tabs = ["PROCESSES", "NETWORK", "FILES", "DISKS", "DEVICES", "MEMORY", "TRACE"], tv = [0, 1, 3, 4, 5, 2, 6]
+    let tabs = ["PROCESSES", "NETWORK", "FILES", "DISKS", "DEVICES", "LAN", "MEMORY", "TRACE"], tv = [0, 1, 3, 4, 5, 7, 2, 6]
     for i in 0..<tabs.count { if button(&x, y, tabs[i], view == tv[i]) && view != tv[i] { setView(tv[i]) } }
     x += 10
     do { let w: Float = 120; g.stroke(x, y, w, 22, rgba(0x4fe3ff, query.isEmpty ? 0.28 : 0.8))
@@ -416,6 +418,9 @@ func drawUi() {
         case 4: lg = [TL(s: "DISKS — floor area and height = allocated size on each volume, by folder.", c: .text), TL(s: "Select a folder to open it in place; the panel can zoom the whole floor into it. Backspace goes up.", c: .dim)]
         case 5: lg = [TL(s: "DEVICES — the IOKit tree by connection, rising from this Mac; network neighbours hang off their interface.", c: .text), TL(s: "Dots follow the connection path for disks and network interfaces (driver counters).", c: .dim)]
         case 3: lg = [TL(s: "FILES — ring: processes holding files open; outer boxes: files shared by several processes.", c: .text), TL(s: "Select a process to fan out its open files. Without the helper only your own processes are readable.", c: .dim)]
+        case 7: lg = [TL(s: "LAN — this Mac at the centre, each network it is on, and every machine found on that network. Stacks are open TCP ports.", c: .text),
+                      TL(s: "Amber = the gateway · green = named · violet = has open ports found by a scan · blue = found, unnamed. A faded node has not been seen for a while.", c: .dim),
+                      TL(s: "Found from the ARP table and from mDNS/SSDP announcements. The sweep, the scan and the router query each send packets, and each asks first.", c: .dim)]
         case 6: lg = [TL(s: "TRACE — your requests leave as magenta orbs; each answer comes back in the colour of its kind.", c: .text),
                       TL(s: "Answers: violet DNS · amber router reply · cyan echo · blue TCP · green TLS and HTTP success", c: .dim),
                       TL(s: "yellow redirect · red error or silence · white greeting. Enter traces at full speed, Shift+Enter step by step. Space pauses, ← → step.", c: .dim)]

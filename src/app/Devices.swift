@@ -151,7 +151,7 @@ final class Devices {
         return out
     }
     // ---- neighbours (ARP for IPv4, NDP for IPv6) from the routing table
-    private func neighbours() -> [(String, String, String)] {
+    func neighbours() -> [(String, String, String)] {
         var out: [(String, String, String)] = []
         for fam in [AF_INET, AF_INET6] {
             var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, fam, NET_RT_FLAGS, RTF_LLINFO]
@@ -181,7 +181,7 @@ final class Devices {
         }
         return out
     }
-    private func gateways() -> [(String, String)] {
+    func gateways() -> [(String, String)] {
         var out: [(String, String)] = []
         for a in [["-n", "get", "default"], ["-n", "get", "-inet6", "default"]] {
             let (st, o) = run("/sbin/route", a, timeout: 3); if st != 0 { continue }
