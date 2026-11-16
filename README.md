@@ -175,6 +175,35 @@ When an agent refuses, it says why, because USM reports the reason: an unknown u
 authentication password), or a message outside its time window. A wrong *privacy* password is the one case with no
 report — the agent cannot decrypt the request, so it answers nothing at all, and the panel says so.
 
+### Physical topology
+
+Everything else in this view is what this Mac can see from where it sits, and from there a switch is invisible: it
+forwards frames without appearing in them, so no amount of pinging, scanning or listening reveals that four
+machines sit behind one port rather than four. The bridge itself knows, because that is its job, and **BRIDGE-MIB**
+exposes the table — so a managed switch or router that answers SNMP can tell you the one thing observation cannot.
+
+MatrixSys reads `dot1dTpFdbTable` (falling back to the VLAN-aware `dot1qTpFdbTable`), maps each bridge port to an
+interface name through `dot1dBasePortIfIndex`, and then:
+
+| What it finds | What it draws |
+|---|---|
+| one MAC on a port | nothing: that machine is cabled straight in, and sits on the ring like any other |
+| several MACs, and an **LLDP** neighbour whose chassis MAC is among them | the device it announced itself to be, named, with its capabilities — green |
+| several MACs, some with a **virtualisation OUI**, exactly one without | a virtualisation host with its VMs orbiting it — violet |
+| several MACs, nothing else known | a pale node labelled `switch?`, which asserts only that *something* is there |
+
+The machines on a multiplexed port stop being peers on the main ring and orbit whatever multiplexes them, so the
+picture stops implying that your network is flat when it is not.
+
+That last row is the honest case and the common one. The panel for such a node says so at length: it has no
+address, cannot be pinged, scanned or named, and could as easily be a powerline adapter or a cable to another room
+as a switch. An inferred node is only created from the **gateway's** table, because on any other device a port with
+many MACs is almost certainly its uplink, which the table cannot distinguish from a switch.
+
+The approach is taken from [netpulse](https://github.com/gnacho/netpulse), which reads the same table over SSH on
+OpenWrt; the rules are its idea, the code here is ours and reaches the table over SNMP, so it works against any
+managed switch rather than one distribution.
+
 ### Administering the router
 
 There is no cross-vendor standard for *changing* a router's settings from a LAN client, so MatrixSys does not try,
@@ -294,7 +323,7 @@ Source layout: `src/shared` (process and descriptor collection, helper protocol,
 (scene, UI, views, actions, capture and memory viewers, helper client), `src/helper` (the privileged daemon),
 `resources` (install and uninstall scripts). The LAN view is `src/app/Lan.swift` (discovery, scanning, UPnP) and
 `src/app/LanView.swift` (its scene and panel), with `src/app/Snmp.swift` for BER and SNMP v2c and
-`src/app/SnmpV3.swift` for USM.
+`src/app/SnmpV3.swift` for USM and `src/app/Topology.swift` for the forwarding table and its inference.
 
 ### Command-line test hooks
 
@@ -361,6 +390,9 @@ offers to move the app to the Trash.
   claim the same name, and a machine can claim any name at all.
 * The MAC vendor table is a snapshot of the IEEE registry from the day you ran `make_oui.sh`, and the panel says so.
   A randomised MAC is labelled as one rather than being looked up.
+* **Topology needs a managed switch.** The forwarding table comes from SNMP, so unmanaged switches — most of what
+  sits in a home — reveal nothing, and the view falls back to a flat ring. That is a limit of what can be known
+  from here, not a gap to be filled by guessing.
 * **SNMP is read-only**, v2c and v3. No `SET` is ever sent, at any version.
   A community string travels in the clear in v1 and v2c; that is the protocol, not this app.
 * v3 privacy is AES-128 only, and SHA-384/512 authentication is not implemented. An agent that requires either is

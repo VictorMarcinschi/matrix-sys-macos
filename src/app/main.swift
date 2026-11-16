@@ -409,6 +409,44 @@ if let ip = argValue("--snmp-dump") {
         print("\nits ARP table (\(s.arp.count))")
         for (a, m) in s.arp { print("  \(a.padding(toLength: 16, withPad: " ", startingAt: 0)) \(m)  \(macIsRandom(m) ? "private MAC" : ouiVendor(m))") }
     }
+    if !s.fdb.isEmpty {
+        print("\nforwarding database (\(s.fdb.count) MACs)")
+        var byPort: [Int: [FdbEntry]] = [:]
+        for e in s.fdb { byPort[e.bridgePort, default: []].append(e) }
+        for (port, es) in byPort.sorted(by: { $0.key < $1.key }) {
+            let nm = es.first?.ifName ?? ""
+            print("  port \(port)\(nm.isEmpty ? "" : " (" + nm + ")"): \(es.count) MAC\(es.count == 1 ? "" : "s")")
+            for e in es.sorted(by: { $0.mac < $1.mac }) {
+                let vm = hypervisorName(e.mac), v = vm.isEmpty ? ouiVendor(e.mac) : vm + " VM"
+                print("      \(e.mac)  \(v)")
+            }
+        }
+    }
+    if !s.lldp.isEmpty {
+        print("\nLLDP neighbours (\(s.lldp.count))")
+        for n in s.lldp {
+            print("  port \(n.localPort): \(n.sysName.isEmpty ? n.chassisMac : n.sysName)"
+                  + (n.chassisMac.isEmpty ? "" : "  chassis \(n.chassisMac)")
+                  + (n.portID.isEmpty ? "" : "  its port \(n.portID)")
+                  + (n.caps.isEmpty ? "" : "  [\(n.caps.joined(separator: ", "))]"))
+        }
+    }
+    if !s.fdb.isEmpty {
+        let selfMacs = Set(s.ifs.map { $0.mac.lowercased() }.filter { !$0.isEmpty })
+        let (nodes, parents) = inferTopology(agentIP: ip, fdb: s.fdb, lldp: s.lldp,
+                                             selfMacs: selfMacs, isGateway: true)
+        print("\ninferred topology (treating this agent as the gateway)")
+        if nodes.isEmpty { print("  every port has at most one machine: nothing is multiplexing anything") }
+        for n in nodes {
+            print("  port \(n.port): \(n.kind.rawValue) — \(n.label)")
+            if !n.note.isEmpty { print("      \(n.note)") }
+            for m in n.macs.sorted() {
+                let vm = hypervisorName(m)
+                print("      \(m)\(vm.isEmpty ? "" : "  " + vm + " VM")")
+            }
+        }
+        print("  \(parents.count) MACs attributed to something that multiplexes their port")
+    }
     if !s.note.isEmpty { print("\n" + s.note) }
     exit(0)
 }

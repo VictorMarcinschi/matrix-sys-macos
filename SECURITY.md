@@ -50,6 +50,7 @@ every pf rule MatrixSys added.
     as soon as a user is configured: its **passwords are read from your login keychain and never stored by
     MatrixSys**, which has no way to write them, and they are never sent on the wire — the message carries an
     HMAC keyed by the password and the agent's engine id, and with authPriv the payload is AES-128 encrypted.
+    The same query reads the bridge forwarding table and LLDP neighbours, which are also reads.
   * *ASK IT OVER UPNP*: SSDP discovery and read-only SOAP calls to the gateway.
   * *WAKE IT*: one Wake-on-LAN broadcast.
 

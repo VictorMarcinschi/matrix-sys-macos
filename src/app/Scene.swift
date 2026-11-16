@@ -26,7 +26,7 @@ func svcName(_ p: Int) -> String { SVC[p] ?? "" }
 func protoName(_ p: Int) -> String { p == 6 ? "TCP" : p == 17 ? "UDP" : p == 1 ? "ICMP" : p == 58 ? "ICMPv6" : "IP" }
 
 enum Shape: Int { case octa = 0, ico, box, tetra }
-enum Kind { case proc, hubnet, hubio, pc, port, host, group, free, other, file, disk, dir, dev, nb, vol, tr, lhost, lport }
+enum Kind { case proc, hubnet, hubio, pc, port, host, group, free, other, file, disk, dir, dev, nb, vol, tr, lhost, lport, ltopo }
 struct Geo { var v: [V3] = []; var e: [(Int, Int)] = []; var t: [(Int, Int, Int)] = [] }
 var GEO: [Geo] = []
 func buildGeo() {
@@ -786,13 +786,14 @@ func spawnPart(_ L: Layer, _ l: Lane, _ dir: Int, _ bytes: Double, _ f: Flow? = 
 }
 
 func pickHover() {
+    let prevHov = hov
     hov = ""; hovPart = -1; if UIS.mouseOverUi { return }
     let L = LY[view]
     var best: Float = 14
     for (i, p) in parts.enumerated() { if let (sx, sy) = project(p.p) { let d = hypot(sx - UIS.mouseX, sy - UIS.mouseY); if d < best { best = d; hovPart = i } } }
     let f = norm(camT - camEye), r = norm(simd_cross(f, V3(0, 1, 0))), u = simd_cross(r, f)
     let th = tan(FOV / 2), nx = (UIS.mouseX / G.LW * 2 - 1) * th * (G.LW / G.LH), ny = (1 - UIS.mouseY / G.LH * 2) * th
-    let d = norm(f + r * nx + u * ny); var bt: Float = 1e9
+    let d = norm(f + r * nx + u * ny); var bt: Float = 1e9; var pick = ""
     for (k, n) in L.nodes where !n.dead {
         var t: Float = -1
         if n.shape == .box {
@@ -807,8 +808,15 @@ func pickHover() {
             let oc = n.pos - camEye; let tc = simd_dot(oc, d)
             if tc > 0 { let d2 = simd_dot(oc, oc) - tc * tc, rr = n.scale.x * 1.15 + tc * 0.004; if d2 < rr * rr { t = tc } }
         }
-        if t >= 0 && t < bt { bt = t; hov = k }
+        if t < 0 { continue }
+        // `t` is the distance to the node's centre, and a ring puts many nodes at nearly the same distance from an
+        // orbiting camera. A strict `<` over a dictionary's arbitrary order then lets float jitter in the easing
+        // camera flip the winner from frame to frame, and the hover highlight blinks between two nodes. So: the
+        // node already hovered keeps it unless another is clearly nearer, and an exact tie resolves by key.
+        let s = (k == prevHov) ? t * 0.97 : t
+        if s < bt || (s == bt && (pick.isEmpty || k < pick)) { bt = s; pick = k }
     }
+    hov = pick
 }
 
 func frameScene(_ dt: Float) {

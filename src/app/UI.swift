@@ -57,7 +57,7 @@ func nodeTip(_ n: Node) -> [TL] {
     case .host: return [TL(s: n.s1 + (isPrivate(n.s1) ? " · LAN" : " · internet"), c: .cyan), TL(s: "\(n.cnt) connection(s) from \(n.more) process(es)", c: .text)] + dnsTip(n.s1)
     case .dir, .vol: return diskTip(n)
     case .dev, .nb: return devTip(n)
-    case .lhost, .lport: return lanTip(n)
+    case .lhost, .lport, .ltopo: return lanTip(n)
     case .file: return [TL(s: (n.s1 as NSString).lastPathComponent, c: .cyan), TL(s: n.s1, c: .text), TL(s: "open in \(n.cnt) process(es)", c: .dim)]
     case .disk: return [TL(s: "Disk", c: .cyan), TL(s: "\(n.cnt) open files visible", c: .text)]
     case .group: return [TL(s: n.name, c: .cyan), TL(s: "\(fmtB(n.v)) resident · \(n.cnt) process(es)", c: .text), TL(s: String(format: "%.1f%% of RAM", n.v / Double(S.memTotal) * 100), c: .text)]
@@ -424,7 +424,8 @@ func drawUi() {
         case 3: lg = [TL(s: "FILES — ring: processes holding files open; outer boxes: files shared by several processes.", c: .text), TL(s: "Select a process to fan out its open files. Without the helper only your own processes are readable.", c: .dim)]
         case 7: lg = [TL(s: "LAN — this Mac at the centre, each network it is on, and every machine found on that network. Stacks are open TCP ports.", c: .text),
                       TL(s: "Amber = the gateway · green = named · violet = has open ports found by a scan · blue = found, unnamed. A faded node has not been seen for a while.", c: .dim),
-                      TL(s: "Found from the ARP table and from mDNS/SSDP announcements. The sweep, the scan and the router query each send packets, and each asks first.", c: .dim)]
+                      TL(s: "A pale box is something a switch's forwarding table says is multiplexing one of its ports, with the machines behind it orbiting it: green if LLDP named it, violet if it is a virtualisation host, pale if only inferred.", c: .dim),
+                      TL(s: "Found from the ARP table and from mDNS/SSDP announcements. The sweep, the scan, the router and SNMP queries each send packets, and each asks first.", c: .dim)]
         case 6: lg = [TL(s: "TRACE — your requests leave as magenta orbs; each answer comes back in the colour of its kind.", c: .text),
                       TL(s: "Answers: violet DNS · amber router reply · cyan echo · blue TCP · green TLS and HTTP success", c: .dim),
                       TL(s: "yellow redirect · red error or silence · white greeting. Enter traces at full speed, Shift+Enter step by step. Space pauses, ← → step.", c: .dim)]

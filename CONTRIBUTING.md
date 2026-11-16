@@ -21,6 +21,10 @@ rebuild while MatrixSys is running.
 | `resources` | Install and uninstall scripts shipped inside the bundle. |
 | `scripts` | `build.sh`, `make_icon.swift`, `run-test.sh`, `make_oui.sh` (optional, builds the MAC vendor table). |
 
+MatrixSys is MIT licensed. Do not paste in code from projects under a copyleft licence: where another project's
+*approach* is worth following, write it afresh and credit the source in a comment, as `src/app/Topology.swift`
+does for netpulse (AGPL-3.0).
+
 ## House rules
 
 * **Real data only.** Every number on screen comes from the system. If something cannot be measured, say so on

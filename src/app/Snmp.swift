@@ -324,6 +324,8 @@ struct SnmpInfo {
     var descr = "", name = "", contact = "", location = "", uptime = "", objectID = ""
     var ifs: [SnmpIf] = []
     var arp: [(ip: String, mac: String)] = []
+    var fdb: [FdbEntry] = []
+    var lldp: [LldpNeighbor] = []
     var note = ""
 }
 
@@ -412,8 +414,18 @@ func snmpQuery(_ ip: String, community: String, port: UInt16 = 161, v3: SnmpV3Us
         let mac = v.mac
         if !mac.isEmpty && mac != "00:00:00:00:00:00" { s.arp.append((addr, mac)) }
     }
+    // the forwarding database, which is the only thing here that reveals physical structure
+    var ifNames: [Int: String] = [:]
+    for i in s.ifs { ifNames[i.index] = i.name }
+    s.fdb = snmpReadFdb(t, ifNames: ifNames, note)
+    s.lldp = snmpReadLldp(t, note)
+
     if s.arp.isEmpty && s.ifs.isEmpty {
         s.note = "It answered the system objects but exposes neither an interface table nor an ARP table."
+    } else if s.fdb.isEmpty {
+        s.note = (s.note.isEmpty ? "" : s.note + " ")
+               + "No forwarding database: this agent is a host or an unmanaged bridge, so it cannot say which "
+               + "machines share a port."
     }
     return s
 }

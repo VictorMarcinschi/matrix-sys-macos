@@ -15,8 +15,12 @@ func lanHostColor(_ h: LanHost) -> Col {
     return C_BLUE
 }
 
-/// How long ago we had evidence of this host, as an opacity: a machine whose ARP entry has expired fades rather than
-/// vanishing, because "not seen for a minute" is not the same as "gone".
+/// How long ago we had evidence of this host: a machine whose ARP entry has expired fades rather than vanishing,
+/// because "not seen for a minute" is not the same as "gone".
+///
+/// This is applied to the node's COLOUR, never to `node.op`. Opacity belongs to the scene's own animation, which
+/// eases it toward 0.1 for everything outside the focus set while something is selected; a builder writing `op`
+/// directly fights that easing and the node pulses once per rebuild.
 func lanFresh(_ h: LanHost, _ t: Double) -> Float {
     let age = t - h.lastSeen
     return age < 60 ? 1 : age < 600 ? 0.65 : 0.35
@@ -49,33 +53,69 @@ func buildLan() {
         lanes.append(l)
     }
 
-    // ---- the hosts, on one ring around the Mac
+    // ---- who sits on the ring, and who hangs off something that sits on it
+    //
+    // A machine whose MAC a forwarding table found sharing a port with others is not a peer of the rest: something
+    // multiplexes that port, and that something gets the ring place while its machines orbit it.
     let others = LN.hosts.filter { !$0.me }
-    for h in others where lanHAng[h.ip] == nil {
-        lanHAng[h.ip] = Float(fnv(h.ip) % 628) / 100
+    let topoById = Dictionary(LN.topo.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    var childrenOf: [String: [LanHost]] = [:]
+    var ringHosts: [LanHost] = []
+    for h in others {
+        if !h.mac.isEmpty, let pid = LN.parentOf[h.mac.lowercased()], topoById[pid] != nil {
+            childrenOf[pid, default: []].append(h)
+        } else {
+            ringHosts.append(h)
+        }
     }
-    for k in lanHAng.keys where !others.contains(where: { $0.ip == k }) { lanHAng.removeValue(forKey: k) }
-    let n = max(1, others.count)
+    // an inference is only worth a node if it explains machines we know; something IDENTIFIED (by LLDP, or as a
+    // virtualisation host) is worth drawing either way, because "there is a switch there" is itself the finding
+    let ringTopo = LN.topo.filter { childrenOf[$0.id] != nil || $0.kind != .inferred }
+    var ringIds = ringHosts.map { "h:" + $0.ip } + ringTopo.map { "t:" + $0.id }
+    ringIds.sort()
+    let ringSet = Set(ringIds)
+    for k in ringIds where lanHAng[k] == nil { lanHAng[k] = Float(fnv(k) % 628) / 100 }
+    for k in lanHAng.keys where !ringSet.contains(k) { lanHAng.removeValue(forKey: k) }
+    let n = max(1, ringIds.count)
     let want = max(34, Float(n) * 4.6 / 6.2832 + 14)
     if want > lanRing || want < lanRing * 0.62 { lanRing = want }
     relaxRing(&lanHAng, min(0.5, 6.2832 / Float(n) * 0.85))
 
-    for h in others {
-        guard let a = lanHAng[h.ip] else { continue }
+    // the things that multiplex a port: drawn before their machines so the machines can hang off them
+    for t3 in ringTopo {
+        guard let a = lanHAng["t:" + t3.id] else { continue }
         let p = V3(cos(a) * lanRing, -14, sin(a) * lanRing)
-        let open = h.openPorts
-        let size: Float = (h.gw ? 1.9 : h.named ? 1.4 : 1.1) + min(0.8, Float(open.count) * 0.08)
-        let spawn = ifPos[h.ifn] ?? me.tpos
-        let q = up(L, "lh:" + h.ip, h.gw ? .box : .tetra, .lhost, p, S3(size), lanHostColor(h), spawn)
-        q.name = h.label.lowercased() + " " + h.ip + " " + h.vendor.lowercased()   // what the type-to-filter matches
-        q.label = h.label + (h.gw ? " · gateway" : "")
-        q.s1 = h.ip
-        q.op = lanFresh(h, t)
-        q.glow = h.replied ? 0.75 : 0.4
-        // a meaningful order, not three big ties: the gateway, then named machines, then whatever has open ports,
-        // then the rest — with the address breaking remaining ties so the same label always wins
-        q.lp = (h.gw ? 6 : h.named ? 2.4 : 1) + min(0.7, Float(open.count) * 0.1)
-             + Float(ipToU32(h.ip) & 0xff) / 1000
+        let kids = childrenOf[t3.id] ?? []
+        let col: Col = t3.kind == .managed ? C_SAFE : t3.kind == .hypervisor ? C_UDP : mix(C_DEEP, C_WHITE, 0.5)
+        let q = up(L, "lt:" + t3.id, t3.kind == .hypervisor ? .ico : .box, .ltopo, p,
+                   S3(1.6 + min(0.9, Float(kids.count) * 0.12)), col, ifPos[LN.ifs.first?.name ?? ""] ?? me.tpos)
+        q.name = t3.label.lowercased() + " " + t3.ifName.lowercased()
+        q.label = t3.label + (t3.kind == .inferred ? "" : "")
+        q.s1 = t3.id
+        q.glow = t3.kind == .inferred ? 0.3 : 0.6        // an inference glows less than something identified
+        q.lp = 5
+        let anchor = ifPos[LN.ifs.first?.name ?? ""] != nil ? "lanif:" + (LN.ifs.first?.name ?? "") : "lanme"
+        let l = mkLane("ltl:" + t3.id, anchor, "lt:" + t3.id, col, w: 0.6, tree: true)
+        l.proto = "port \(t3.port)" + (t3.ifName.isEmpty ? "" : " · " + t3.ifName)
+        l.from = t3.agentIP; l.to = t3.label; l.tree = true
+        lanes.append(l)
+
+        // its machines on a small ring of their own
+        let kr = max(7, Float(kids.count) * 2.6 / 6.2832 + 5)
+        for (i, h) in kids.sorted(by: { ipToU32($0.ip) < ipToU32($1.ip) }).enumerated() {
+            let ca = Float(i) * 6.2832 / Float(max(1, kids.count)) + Float(fnv(t3.id) % 100) / 100
+            let cp = V3(p.x + cos(ca) * kr, p.y + 5, p.z + sin(ca) * kr)
+            lanPlaceHost(L, h, cp, t3.kind == .hypervisor && isHypervisorMAC(h.mac), p, &lanes, LN.t)
+            let cl = mkLane("ltc:" + h.ip, "lt:" + t3.id, "lh:" + h.ip, C_DEEP, w: 0.4, tree: true)
+            cl.proto = "shares port \(t3.port)"; cl.from = t3.label; cl.to = h.label; cl.tree = true
+            lanes.append(cl)
+        }
+    }
+
+    for h in ringHosts {
+        guard let a = lanHAng["h:" + h.ip] else { continue }
+        let p = V3(cos(a) * lanRing, -14, sin(a) * lanRing)
+        lanPlaceHost(L, h, p, false, ifPos[h.ifn] ?? me.tpos, &lanes, t)
         let anchor = ifPos[h.ifn] != nil ? "lanif:" + h.ifn : "lanme"
         let l = mkLane("lhl:" + h.ip, anchor, "lh:" + h.ip, h.gw ? C_WARN : C_DEEP, w: h.gw ? 0.8 : 0.45, tree: true)
         l.proto = h.gw ? "default route" : "same network"
@@ -83,23 +123,40 @@ func buildLan() {
         l.to = h.label
         l.tree = true
         lanes.append(l)
-
-        // open ports stack above the host
-        for (i, pt) in open.enumerated() {
-            let pp = V3(p.x, p.y + 5 + Float(i) * 2.6, p.z)
-            let pq = up(L, "lp:\(h.ip):\(pt.port)", .octa, .lport, pp, S3(0.75), C_SAFE, p)
-            pq.name = "\(pt.port) " + svcName(pt.port).lowercased()
-            pq.label = "\(pt.port) " + svcName(pt.port)
-            pq.port = pt.port; pq.s1 = h.ip; pq.owner = "lh:" + h.ip
-            pq.glow = 0.7; pq.op = q.op
-            pq.lp = 0.9 - Float(i) * 0.02          // the lowest port's label wins when a stack crowds
-            let pl = mkLane("lpl:\(h.ip):\(pt.port)", "lh:" + h.ip, "lp:\(h.ip):\(pt.port)", C_SAFE, w: 0.35, tree: true)
-            pl.proto = "TCP \(pt.port) open"; pl.from = h.label; pl.to = "\(pt.port) " + svcName(pt.port); pl.tree = true
-            lanes.append(pl)
-        }
     }
     L.ext = max(60, lanRing + 22)
     endNodes(L); setLanes(L, lanes)
+}
+
+/// Draws one machine and the stack of its open ports. Shared by the main ring and by the sub-ring around whatever
+/// multiplexes a port, so a machine looks the same wherever the forwarding table says it sits.
+func lanPlaceHost(_ L: Layer, _ h: LanHost, _ p: V3, _ isVM: Bool, _ spawn: V3, _ lanes: inout [Lane], _ t: Double) {
+    let open = h.openPorts
+    let fresh = lanFresh(h, t)
+    let size: Float = (h.gw ? 1.9 : h.named ? 1.4 : 1.1) + min(0.8, Float(open.count) * 0.08)
+    let q = up(L, "lh:" + h.ip, h.gw ? .box : .tetra, .lhost, p, S3(size),
+               mix(C_DEEP, isVM ? C_UDP : lanHostColor(h), fresh), spawn)
+    q.name = h.label.lowercased() + " " + h.ip + " " + h.vendor.lowercased()   // what the type-to-filter matches
+    q.label = h.label + (h.gw ? " · gateway" : isVM ? " · VM" : "")
+    q.s1 = h.ip
+    q.glow = (h.replied ? 0.75 : 0.4) * fresh
+    // a meaningful order, not three big ties: the gateway, then named machines, then whatever has open ports,
+    // then the rest — with the address breaking remaining ties so the same label always wins
+    q.lp = (h.gw ? 6 : h.named ? 2.4 : 1) + min(0.7, Float(open.count) * 0.1)
+         + Float(ipToU32(h.ip) & 0xff) / 1000
+
+    for (i, pt) in open.enumerated() {
+        let pp = V3(p.x, p.y + 5 + Float(i) * 2.6, p.z)
+        let pq = up(L, "lp:\(h.ip):\(pt.port)", .octa, .lport, pp, S3(0.75), C_SAFE, p)
+        pq.name = "\(pt.port) " + svcName(pt.port).lowercased()
+        pq.label = "\(pt.port) " + svcName(pt.port)
+        pq.port = pt.port; pq.s1 = h.ip; pq.owner = "lh:" + h.ip
+        pq.glow = 0.7 * fresh
+        pq.lp = 0.9 - Float(i) * 0.02          // the lowest port's label wins when a stack crowds
+        let pl = mkLane("lpl:\(h.ip):\(pt.port)", "lh:" + h.ip, "lp:\(h.ip):\(pt.port)", C_SAFE, w: 0.35, tree: true)
+        pl.proto = "TCP \(pt.port) open"; pl.from = h.label; pl.to = "\(pt.port) " + svcName(pt.port); pl.tree = true
+        lanes.append(pl)
+    }
 }
 
 func lanSpawnFlow(_ f: Flow) {}   // the LAN view draws reachability, not traffic: the Network view already has the traffic
@@ -114,8 +171,19 @@ func lanRow(_ h: LanHost) -> String {
     return s
 }
 
+func lanTopo(_ id: String) -> TopoNode? { LN?.topo.first { $0.id == id } }
+
 func lanTip(_ n: Node) -> [TL] {
     guard let LN = LN else { return [] }
+    if n.kind == .ltopo {
+        guard let t3 = lanTopo(n.s1) else { return [] }
+        var o = [TL(s: t3.label, c: t3.kind == .inferred ? .dim : .cyan),
+                 TL(s: t3.kind.shown, c: .text),
+                 TL(s: "port \(t3.port)" + (t3.ifName.isEmpty ? "" : " · " + t3.ifName) + " on " + t3.agentIP, c: .dim)]
+        o.append(TL(s: "\(t3.macs.count) machines share it", c: .text))
+        if t3.kind == .inferred { o.append(TL(s: "the forwarding table cannot say what it is", c: .warn)) }
+        return o
+    }
     if n.kind == .lport {
         guard let h = lanHost(n.s1), let p = h.openPorts.first(where: { $0.port == n.port }) else { return [] }
         var t = [TL(s: "TCP \(n.port) " + svcName(n.port), c: .cyan), TL(s: "open on " + h.label, c: .text)]
@@ -331,6 +399,36 @@ func lanPanel() {
         P(5, "TRACE THROUGH IT", "", .dim, "act:lantrace:" + ip)
         P(5, "DEVICES VIEW", "", .dim, "nb:" + ip, 5)
         netSection(-1, ip)
+        return
+    }
+
+    // ---- whatever multiplexes a port
+    if sel.hasPrefix("lt:") {
+        let id = String(sel.dropFirst(3))
+        guard let t3 = lanTopo(id) else { sel = ""; computeFocus(); return }
+        P(0, t3.label)
+        P(1, t3.kind.shown)
+        P(1, "port \(t3.port)" + (t3.ifName.isEmpty ? "" : " · " + t3.ifName) + " of " + t3.agentIP)
+        if !t3.note.isEmpty { for line in wrapText(t3.note, 46) { P(1, line) } }
+        if t3.kind == .inferred {
+            P(2, "WHAT THIS IS AND IS NOT")
+            P(1, "This node is an inference, not a machine MatrixSys has spoken to. A switch forwards frames without")
+            P(1, "appearing in them, so it has no address here and cannot be pinged, scanned or named. All that is")
+            P(1, "known is that \(t3.macs.count) machines answer on one port of \(t3.agentIP), which takes something.")
+            P(1, "It could be a switch, a powerline adapter, an access point or a cable to another room.")
+        }
+        if !t3.mgmtIP.isEmpty { P(3, "management address", t3.mgmtIP, .cyan) }
+        if !t3.caps.isEmpty { P(3, "announces itself as", t3.caps.joined(separator: ", "), .text) }
+        P(2, "BEHIND IT (\(t3.macs.count))")
+        for m in t3.macs.sorted() {
+            let h = LN.hosts.first { $0.mac.lowercased() == m.lowercased() }
+            let vm = hypervisorName(m)
+            let label = h.map { lanRow($0) } ?? (m + (vm.isEmpty ? "  (not seen from here)" : "  " + vm))
+            P(4, label, "", vm.isEmpty ? .dim : .warn, h.map { "lh:" + $0.ip } ?? "")
+        }
+        P(2, "LEARNED FROM")
+        if let a = LN.hosts.first(where: { $0.ip == t3.agentIP }) { P(4, lanRow(a), "", .dim, "lh:" + a.ip) }
+        P(1, "Its BRIDGE-MIB forwarding table, over SNMP.")
         return
     }
 

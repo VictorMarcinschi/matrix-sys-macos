@@ -65,6 +65,8 @@ struct LanRouter {
 final class LanSnap {
     var hosts: [LanHost] = []
     var ifs: [LanIf] = []
+    var topo: [TopoNode] = []            // switches and hypervisors a forwarding table revealed
+    var parentOf: [String: String] = [:] // lowercased MAC -> topo node id
     var t = 0.0
     var router = LanRouter()
     var busy = ""          // what is running right now, for the panel
@@ -123,6 +125,7 @@ final class Lan {
     private var hosts: [String: LanHost] = [:]
     private var snap: LanSnap? = nil
     private var router = LanRouter()
+    private var topo: [TopoNode] = [], parentOf: [String: String] = [:]
     private var busy = "", progress = 0.0
     private var lastSweep = 0.0, sweepSent = 0
     private var working = false
@@ -184,6 +187,7 @@ final class Lan {
             let s = LanSnap()
             lock.lock()
             s.t = nowSec(); s.ifs = ifs; s.router = router; s.busy = busy; s.progress = progress
+            s.topo = topo; s.parentOf = parentOf
             s.lastSweep = lastSweep; s.sweepSent = sweepSent; s.listening = listening
             s.hosts = hosts.values.sorted { ipToU32($0.ip) < ipToU32($1.ip) }
             for i in s.hosts.indices where mine.contains(s.hosts[i].ip) { s.hosts[i].me = true }
@@ -401,6 +405,21 @@ final class Lan {
             let info = snmpQuery(ip, community: community, port: port, v3: v3) { p, s in self.setBusy(s, p) }
             self.edit(ip) { h in h.snmp = info }
             guard info.ok else { toast("No SNMP answer from \(ip) with community \"\(community)\"", .warn); return }
+            // structure, from the one table that knows it
+            if !info.fdb.isEmpty {
+                var selfMacs = Set(info.ifs.map { $0.mac.lowercased() }.filter { !$0.isEmpty })
+                for i in lanInterfaces() { let m = macOf(i.name); if !m.isEmpty { selfMacs.insert(m.lowercased()) } }
+                let isGw: Bool = { self.lock.lock(); defer { self.lock.unlock() }; return self.hosts[ip]?.gw ?? false }()
+                let (nodes, parents) = inferTopology(agentIP: ip, fdb: info.fdb, lldp: info.lldp,
+                                                     selfMacs: selfMacs, isGateway: isGw)
+                self.lock.lock()
+                self.topo.removeAll { $0.agentIP == ip }
+                self.topo += nodes
+                for (k, v) in self.parentOf where v.hasPrefix("topo:\(ip):") { self.parentOf.removeValue(forKey: k) }
+                for (k, v) in parents { self.parentOf[k] = v }
+                self.lock.unlock()
+            }
+
             var added = 0
             let mine = Set(lanInterfaces().map { $0.ip })
             for (addr, mac) in info.arp where validIp(addr) && !isLoop(addr) && !mine.contains(addr) {
@@ -414,8 +433,11 @@ final class Lan {
                     if !known { h.fromRouter = true; h.lastSeen = nowSec() }
                 }
             }
+            let topoCount: Int = { self.lock.lock(); defer { self.lock.unlock() }; return self.topo.filter { $0.agentIP == ip }.count }()
             toast("\(ip): " + (info.name.isEmpty ? info.descr.prefix(40).description : info.name)
                   + " · \(info.ifs.count) interfaces · \(info.arp.count) in its ARP table"
+                  + (info.fdb.isEmpty ? "" : " · \(info.fdb.count) MACs on \(Set(info.fdb.map { $0.bridgePort }).count) ports")
+                  + (topoCount > 0 ? ", \(topoCount) multiplexed" : "")
                   + (added > 0 ? ", \(added) new here" : ""), .safe)
         }.start()
     }
